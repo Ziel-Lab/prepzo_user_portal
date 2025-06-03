@@ -1,0 +1,12 @@
+/env
+/venv
+/pycache
+/app/userPortal/careerTools/linkedinOptimizer/__pycache__
+/app/userPortal/careerTools/linkedinOptimizer/routes.py
+/app/userPortal/careerTools/linkedinOptimizer/__init__.py
+/app/userPortal/careerTools/linkedinOptimizer/routes.py
+/app/userPortal/careerTools/linkedinOptimizer/__init__.py
+/__pycache__
+/app/stripePayment
+.env
+/.env
