@@ -19,4 +19,4 @@ EXPOSE 5000
 # and run in debug mode, you might set these, but for production, 
 # you'd typically use a production-grade WSGI server like Gunicorn.
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "run:app"] 
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "run:app"] 

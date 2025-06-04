@@ -1,4 +1,6 @@
-from flask import Flask
+from flask import Flask, request
+import logging
+import sys
 from .main import main_bp
 from .userPortal.documents import upload_bp
 from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
@@ -8,8 +10,35 @@ from .extensions import init_supabase
 
 def create_app():
     app = Flask(__name__)
+    app.logger.handlers.clear()
+    app.logger.setLevel(logging.INFO) 
+    stream_handler = logging.StreamHandler(sys.stdout) 
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    stream_handler.setFormatter(formatter)
+    app.logger.addHandler(stream_handler)
 
     init_supabase()  # Initializes Supabase client
+
+    @app.before_request
+    def log_request_info():
+        app.logger.info(f"Incoming Request: {request.method} {request.path}")
+        if request.data and request.content_type != 'multipart/form-data': 
+            try:
+                if request.content_type == 'application/json':
+                    body_preview = str(request.get_json(silent=True) or request.data.decode('utf-8', errors='replace'))[:500]
+                    app.logger.info(f"Request Body (JSON): {body_preview}")
+                elif request.form:
+                     app.logger.info(f"Request Form Data: {request.form}")
+                else:
+                    body_preview = str(request.data[:500])
+                    app.logger.info(f"Request Body (Preview): {body_preview}")
+            except Exception as e:
+                app.logger.warning(f"Could not parse/log request body: {e}")
+
+    @app.after_request
+    def log_response_info(response):
+        app.logger.info(f"Outgoing Response: {request.method} {request.path} - Status {response.status_code}")
+        return response
 
     app.register_blueprint(main_bp)
     app.register_blueprint(upload_bp)
