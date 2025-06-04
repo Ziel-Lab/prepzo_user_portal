@@ -71,7 +71,7 @@ def analyze_resume():
             doc_query = extensions.supabase.table("user_documents") \
                 .select("id") \
                 .eq("document_url", current_resume_url) \
-                .cs("uid", [current_user_id]) \
+                .eq("uid", current_user_id) \
                 .single() \
                 .execute()
             if doc_query.data and doc_query.data.get("id"):
@@ -183,7 +183,7 @@ def roast_resume():
 
 
             document_data = {
-                "uid": [current_user_id], 
+                "uid": current_user_id, 
                 "document_name": file_to_upload.filename,
                 "document_type": flask_mimetype, 
                 "document_url": resume_url_for_xano,
@@ -203,7 +203,7 @@ def roast_resume():
                 doc_query = extensions.supabase.table("user_documents") \
                     .select("id") \
                     .eq("document_url", resume_url_for_xano) \
-                    .cs("uid", [current_user_id]) \
+                    .eq("uid", current_user_id) \
                     .single() \
                     .execute()
                 if doc_query.data and doc_query.data.get("id"):
