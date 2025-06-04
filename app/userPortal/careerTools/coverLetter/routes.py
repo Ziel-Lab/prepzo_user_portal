@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from . import cover_letter_bp 
 
 load_dotenv()
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000") 
+FRONTEND_URL = os.getenv("FRONTEND_ORIGIN") 
 XANO_API_URL_COVER_LETTER = os.getenv("XANO_API_URL_COVER_LETTER")
 
 

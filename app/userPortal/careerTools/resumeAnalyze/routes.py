@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from . import resume_analyze_bp 
 
 load_dotenv()
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000") 
+FRONTEND_URL = os.getenv("FRONTEND_ORIGIN") 
 XANO_API_URL_RESUME_ANALYZE = os.getenv("XANO_API_URL_RESUME_ANALYZE")
 XANO_API_URL_RESUME_ROAST = os.getenv("XANO_API_URL_RESUME_ROAST")
 SUPABASE_BUCKET = "user-documents"
