@@ -7,9 +7,17 @@ from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
 from .userPortal.careerTools.coverLetter import cover_letter_bp
 from .userPortal.careerTools.linkedinOptimizer import linkedin_optimizer_bp
 from .extensions import init_supabase
+from .secrets import get_secret
 
 def create_app():
     app = Flask(__name__)
+
+    secret_name = "userPortal"
+    region_name = "us-east-1"
+    secrets = get_secret(secret_name, region_name)
+    for key, value in secrets.items():
+        app.config[key] = value
+        
     app.logger.handlers.clear()
     app.logger.setLevel(logging.INFO) 
     stream_handler = logging.StreamHandler(sys.stdout) 

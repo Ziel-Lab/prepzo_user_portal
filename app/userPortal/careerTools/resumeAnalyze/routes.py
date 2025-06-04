@@ -1,22 +1,15 @@
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 from flask_cors import CORS
 import requests 
 import os
 from app import extensions 
 import magic
 import json
-from dotenv import load_dotenv
 
 
 from . import resume_analyze_bp 
 
-load_dotenv()
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000") 
-XANO_API_URL_RESUME_ANALYZE = os.getenv("XANO_API_URL_RESUME_ANALYZE")
-XANO_API_URL_RESUME_ROAST = os.getenv("XANO_API_URL_RESUME_ROAST")
-SUPABASE_BUCKET = "user-documents"
-
-CORS(resume_analyze_bp, origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "OPTIONS", "GET"])
+CORS(resume_analyze_bp, origins=["*"], supports_credentials=True, methods=["POST", "OPTIONS", "GET"])
 
 def get_authenticated_user():
     """Helper to extract and validate JWT token and return user object."""
@@ -45,6 +38,11 @@ def analyze_resume():
                 user.user_metadata.get('display_name') or \
                 user.email or current_user_id
 
+    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
+    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
+    xano_api_url_resume_roast = current_app.config.get("XANO_API_URL_RESUME_ROAST")
+    SUPABASE_BUCKET = "user-documents"
+
     try:
         data = request.form
         current_resume_url = data.get("current_resume") 
@@ -62,7 +60,7 @@ def analyze_resume():
             "additional_comments": additional_comment_text
         }
 
-        xano_response = requests.post(XANO_API_URL_RESUME_ANALYZE, json=xano_payload)
+        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload)
         xano_response.raise_for_status()
         xano_data = xano_response.json() 
 
@@ -121,6 +119,9 @@ def get_analyze_resume():
 
     current_user_id = str(user.id)
 
+    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
+    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
+
     try:
         query_response = extensions.supabase.table("analyze_resume") \
             .select("*") \
@@ -144,6 +145,10 @@ def roast_resume():
     user_name = user.user_metadata.get('name') or \
                 user.user_metadata.get('display_name') or \
                 user.email or current_user_id
+
+    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
+    xano_api_url_resume_roast = current_app.config.get("XANO_API_URL_RESUME_ROAST")
+    SUPABASE_BUCKET = "user-documents"
 
     resume_url_for_xano = None
     resume_id_from_db = None
@@ -219,7 +224,7 @@ def roast_resume():
              return jsonify({"error": "Failed to determine resume URL for processing"}), 500
 
         xano_payload = {"current_resume": resume_url_for_xano}
-        xano_response = requests.post(XANO_API_URL_RESUME_ROAST, json=xano_payload)
+        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
