@@ -1,4 +1,3 @@
-# app/extensions.py
 from supabase import create_client
 import os
 

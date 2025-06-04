@@ -19,9 +19,4 @@ EXPOSE 5000
 # and run in debug mode, you might set these, but for production, 
 # you'd typically use a production-grade WSGI server like Gunicorn.
 
-# Command to run the application
-# Replace with your actual run command if different
-# For a production setup, you might use Gunicorn, e.g.:
-# CMD ["gunicorn", "--bind", "0.0.0.0:5000", "your_wsgi_application_module:app_instance_name"]
-# For a simple development server run via run.py:
-CMD ["python", "run.py"] 
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "run:app"] 
