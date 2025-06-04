@@ -1,13 +1,11 @@
 from supabase import create_client
-import os
 
 supabase = None
 
-def init_supabase():
+def init_supabase(app_config):
     global supabase
-    SUPABASE_URL = os.getenv("SUPABASE_URL")
-    SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    
+    SUPABASE_URL = app_config.get("SUPABASE_URL")
+    SUPABASE_KEY = app_config.get("SUPABASE_SERVICE_ROLE_KEY")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("Error: SUPABASE_URL or SUPABASE_KEY is missing. Supabase client NOT initialized.")

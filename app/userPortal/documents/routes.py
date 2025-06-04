@@ -8,9 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN")
-
-CORS(upload_bp, origins=[FRONTEND_URL], supports_credentials=True,
+CORS(upload_bp, origins=["*"], supports_credentials=True,
      methods=["POST", "GET", "OPTIONS", "DELETE", "PATCH"])
 
 SUPABASE_BUCKET = "user-documents"

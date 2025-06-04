@@ -1,4 +1,4 @@
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 from flask_cors import CORS
 import requests 
 import os
@@ -6,17 +6,11 @@ from app import extensions
 import json
 import logging 
 from gotrue.errors import AuthApiError
-from dotenv import load_dotenv
 
 
 from . import linkedin_optimizer_bp
 
-load_dotenv()
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN") 
-XANO_API_URL_LINKEDIN_OPTIMIZER = os.getenv("XANO_API_URL_LINKEDIN_OPTIMIZER")
-
-
-CORS(linkedin_optimizer_bp, origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
+CORS(linkedin_optimizer_bp, origins=["*"], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
 
 def get_authenticated_user():
     """Helper to extract and validate JWT token and return user object."""

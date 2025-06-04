@@ -1,20 +1,14 @@
-from flask import request, jsonify
+from flask import request, jsonify, current_app
 from flask_cors import CORS
 import requests 
 import os
 from app import extensions 
 import json
-from dotenv import load_dotenv
 
 
 from . import cover_letter_bp 
 
-load_dotenv()
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN") 
-XANO_API_URL_COVER_LETTER = os.getenv("XANO_API_URL_COVER_LETTER")
-
-
-CORS(cover_letter_bp, origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
+CORS(cover_letter_bp, origins=["*"], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
 
 def get_authenticated_user():
     """Helper to extract and validate JWT token and return user object."""
@@ -43,6 +37,8 @@ def create_cover_letter():
 
     current_user_id = str(user.id)
 
+    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
+    xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
 
     try:
         data = request.form
@@ -61,7 +57,7 @@ def create_cover_letter():
             "additional_comments": user_additional_comments_text
         }
 
-        xano_response = requests.post(XANO_API_URL_COVER_LETTER, json=xano_payload)
+        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
@@ -134,6 +130,8 @@ def get_cover_letters():
     if error_response:
         return error_response, status_code
     current_user_id = str(user.id)
+    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
+    xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
     try:
         query_response = (
             extensions.supabase.table("cover_letter")
