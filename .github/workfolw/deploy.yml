@@ -1,0 +1,89 @@
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Determine short SHA
+        id: vars
+        run: echo "sha_short=${GITHUB_SHA::7}" >>"$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to ECR
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Deploy to EC2 with rollback
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+
+            IMAGE_TAG=${{ steps.vars.outputs.sha_short }}
+            ECR_REGISTRY=${{ secrets.ECR_REGISTRY }}
+            ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY }}
+            CONTAINER_NAME=prepzo-prod
+            PORT=5000
+
+            echo "Deploying image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+            # Login to ECR
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+            # Check if previous tag file exists
+            if [ -f ~/previous_image_tag.txt ]; then
+              PREVIOUS_IMAGE_TAG=$(cat ~/previous_image_tag.txt)
+            else
+              PREVIOUS_IMAGE_TAG=""
+            fi
+
+            # Deploy new container
+            docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            docker stop $CONTAINER_NAME || true
+            docker rm $CONTAINER_NAME || true
+            docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            
+            # Health-check & rollback
+            sleep 5 
+            if curl -f http://localhost:$PORT/health; then
+              echo "$IMAGE_TAG" > ~/previous_image_tag.txt
+              echo "✅ Deployment successful.🔥"
+            else
+              echo "❌ Health check failed. Rolling back..."
+              docker stop $CONTAINER_NAME || true
+              docker rm   $CONTAINER_NAME || true
+              if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
+                docker run -d --restart always \
+                  -p 127.0.0.1:$PORT:$PORT \
+                  --name $CONTAINER_NAME \
+                  $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
+              else
+                echo "⚠️ No previous image to roll back to."
+              fi
+            fi
