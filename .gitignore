@@ -9,3 +9,13 @@
 /__pycache__
 .env
 /.env
+/app/__pycache__/__init__.cpython-312.pyc
+/app/__pycache__/extensions.cpython-312.pyc
+/app/main/__pycache__/__init__.cpython-312.pyc
+/app/main/__pycache__/routes.cpython-312.pyc
+/app/userPortal/careerTools/coverLetter/__pycache__/__init__.cpython-312.pyc 
+/app/userPortal/careerTools/coverLetter/__pycache__/routes.cpython-312.pyc   
+/app/userPortal/careerTools/resumeAnalyze/__pycache__/__init__.cpython-312.pyc
+/app/userPortal/careerTools/resumeAnalyze/__pycache__/routes.cpython-312.pyc 
+/app/userPortal/documents/__pycache__/__init__.cpython-312.pyc
+/app/userPortal/documents/__pycache__/routes.cpython-312.pyc
