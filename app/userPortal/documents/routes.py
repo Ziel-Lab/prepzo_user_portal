@@ -5,9 +5,7 @@ import magic
 from app import extensions
 from . import upload_bp 
 
-FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
-
-CORS(upload_bp, origins=[FRONTEND_URL], supports_credentials=True,
+CORS(upload_bp, origins=["*"], supports_credentials=True,
      methods=["POST", "GET", "OPTIONS", "DELETE", "PATCH"])
 
 SUPABASE_BUCKET = "user-documents"

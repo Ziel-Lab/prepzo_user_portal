@@ -25,7 +25,7 @@ def create_app():
     stream_handler.setFormatter(formatter)
     app.logger.addHandler(stream_handler)
 
-    init_supabase()  # Initializes Supabase client
+    init_supabase(app.config)  # Initializes Supabase client with app config
 
     @app.before_request
     def log_request_info():
