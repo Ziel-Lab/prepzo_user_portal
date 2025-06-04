@@ -5,15 +5,17 @@ import os
 from app import extensions 
 import magic
 import json
+from dotenv import load_dotenv
+
 
 from . import resume_analyze_bp 
 
+load_dotenv()
 FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000") 
-XANO_API_URL = "https://xfsf-9afu-ywqu.m2.xano.io/api:_jdqfybN/resume_analyze"
-XANO_ROAST_API_URL = "https://xfsf-9afu-ywqu.m2.xano.io/api:_jdqfybN/resume_roast"
+XANO_API_URL_RESUME_ANALYZE = os.getenv("XANO_API_URL_RESUME_ANALYZE")
+XANO_API_URL_RESUME_ROAST = os.getenv("XANO_API_URL_RESUME_ROAST")
 SUPABASE_BUCKET = "user-documents"
 
-# Enable CORS for this blueprint
 CORS(resume_analyze_bp, origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "OPTIONS", "GET"])
 
 def get_authenticated_user():
@@ -28,7 +30,7 @@ def get_authenticated_user():
         user = user_response.user
         if not user or not user.id:
             return None, jsonify({"error": "Invalid token or user not found"}), 401
-        return user, None, None  # Return user object, no error, no status
+        return user, None, None
     except Exception as e:
         return None, jsonify({"error": f"Authentication failed: {str(e)}"}), 401
 
@@ -45,7 +47,7 @@ def analyze_resume():
 
     try:
         data = request.form
-        current_resume_url = data.get("current_resume") # This is a URL
+        current_resume_url = data.get("current_resume") 
         job_description = data.get("job_description")
         company_website = data.get("company_website")
         additional_comment_text = data.get("additional_comments") 
@@ -60,11 +62,10 @@ def analyze_resume():
             "additional_comments": additional_comment_text
         }
 
-        xano_response = requests.post(XANO_API_URL, json=xano_payload)
+        xano_response = requests.post(XANO_API_URL_RESUME_ANALYZE, json=xano_payload)
         xano_response.raise_for_status()
         xano_data = xano_response.json() 
 
-        # Attempt to find resume_id from user_documents table by URL
         resume_id_from_db = None
         try:
             doc_query = extensions.supabase.table("user_documents") \
@@ -98,8 +99,6 @@ def analyze_resume():
                 print(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
         except Exception as e:
             print(f"Error inserting into analyze_resume table: {str(e)}")
-            # Decide how to handle this: return error to client or just log?
-            # For now, we will still return Xano's response even if DB insert fails.
 
         return jsonify(xano_data), xano_response.status_code
 
@@ -182,11 +181,11 @@ def roast_resume():
             )
             resume_url_for_xano = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
 
-            # Save metadata to user_documents table
+
             document_data = {
-                "uid": [current_user_id], # Assuming 'uid' is an array field as per documents/routes.py
+                "uid": [current_user_id], 
                 "document_name": file_to_upload.filename,
-                "document_type": flask_mimetype, # Storing Flask's detected mimetype
+                "document_type": flask_mimetype, 
                 "document_url": resume_url_for_xano,
                 "display_name": user_name,
                 "document_comments": "Uploaded for resume roast"
@@ -200,7 +199,6 @@ def roast_resume():
 
         elif current_resume_url_form:
             resume_url_for_xano = current_resume_url_form
-            # Attempt to find resume_id from user_documents table by URL
             try:
                 doc_query = extensions.supabase.table("user_documents") \
                     .select("id") \
@@ -220,41 +218,34 @@ def roast_resume():
         if not resume_url_for_xano:
              return jsonify({"error": "Failed to determine resume URL for processing"}), 500
 
-        # Call Xano Roast API
         xano_payload = {"current_resume": resume_url_for_xano}
-        xano_response = requests.post(XANO_ROAST_API_URL, json=xano_payload)
+        xano_response = requests.post(XANO_API_URL_RESUME_ROAST, json=xano_payload)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
-        # Process Xano response to extract and parse nested feedback if present
-        feedback_content_for_db = xano_data  # Default to the whole Xano response
+        feedback_content_for_db = xano_data  
 
         raw_feedback_payload = xano_data.get("feedback")
         if isinstance(raw_feedback_payload, str):
             try:
-                # Attempt to parse the string value of the "feedback" key
                 parsed_inner_json = json.loads(raw_feedback_payload)
                 feedback_content_for_db = parsed_inner_json
             except json.JSONDecodeError as e:
                 print(f"Roast Resume: Error decoding JSON string from 'feedback' key: {e}. Storing raw Xano response object instead.")
-                # feedback_content_for_db remains xano_data (the full outer object)
-            except TypeError: # Should be caught by isinstance, but as a safeguard
+            except TypeError: 
                 print(f"Roast Resume: Value for 'feedback' key was not a string (TypeError). Storing raw Xano response object.")
-                # feedback_content_for_db remains xano_data
-        elif raw_feedback_payload is not None: # It exists but is not a string
-            print(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
-            # feedback_content_for_db remains xano_data
-        # If raw_feedback_payload is None (key "feedback" is missing), feedback_content_for_db also remains xano_data
 
-        # Store results in analyze_resume table
+        elif raw_feedback_payload is not None: 
+            print(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
+
         db_payload = {
             "user": current_user_id,
             "user_name": user_name,
             "current_resume": resume_url_for_xano,
-            "job_description": None, # Not applicable for roast
-            "company_website": None, # Not applicable for roast
-            "additional_comment": "Resume Roast Feedback", # Default comment
-            "feedback_analysis": feedback_content_for_db, # Use processed content
+            "job_description": None, 
+            "company_website": None, 
+            "additional_comment": "Resume Roast Feedback", 
+            "feedback_analysis": feedback_content_for_db, 
             "resume_id": resume_id_from_db
         }
         
@@ -264,19 +255,18 @@ def roast_resume():
                 print(f"Warning: Supabase insert into analyze_resume (roast) may have failed. Response: {insert_response}")
         except Exception as e:
             print(f"Error inserting into analyze_resume table (roast): {str(e)}")
-            # Continue to return Xano response even if DB insert fails
 
         return jsonify(xano_data), xano_response.status_code
 
     except requests.exceptions.HTTPError as http_err:
         try:
             error_detail = http_err.response.json()
-        except ValueError: # If Xano error response is not JSON
+        except ValueError: 
             error_detail = str(http_err.response.text)
         return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
-        print(f"Unexpected error in roast_resume: {str(e)}") # Log the full error server-side
+        print(f"Unexpected error in roast_resume: {str(e)}")
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 

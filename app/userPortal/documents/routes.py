@@ -55,7 +55,7 @@ def upload_document():
   
     flask_mimetype = file.mimetype
 
-    final_content_type_for_storage = flask_mimetype # Default to Flask's mimetype
+    final_content_type_for_storage = flask_mimetype 
 
     if flask_mimetype == 'application/pdf':
         final_content_type_for_storage = 'application/pdf'
@@ -67,25 +67,25 @@ def upload_document():
             print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
 
 
-    
-    file_path = file.filename
+    # Construct a unique path in storage using user ID and original filename
+    storage_file_path = f"{current_user_id}/{file.filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
 
     try:
         extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
-            file_path,
+            storage_file_path,  # Use the unique path for storage
             file_bytes,
             file_options={
                 "content-type": final_content_type_for_storage,
                 "content-disposition": f'inline; filename="{file.filename}"'
             }
         )
-        public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_path)
+        public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path) # Get URL based on unique path
 
         document_data = {
             "uid": current_user_id,
-            "document_name": file.filename,
+            "document_name": file.filename,  # Store original filename for display
             "document_type": flask_mimetype,
             "document_url": public_url,
             "display_name": user_display_name,
@@ -143,9 +143,9 @@ def delete_document(document_id):
         if not select_response.data:
             return jsonify({"error": "Document not found or you do not have permission to delete it."}), 404
 
-        document_name = select_response.data[0]["document_name"]
-        # Assuming file_path_in_storage is just the document_name, as per upload logic
-        file_path_in_storage = document_name
+        document_name_from_db = select_response.data[0]["document_name"]
+        # Construct the correct storage path using user ID and the document name from DB
+        file_path_in_storage = f"{current_user_id}/{document_name_from_db}"
 
         # 1. Attempt to delete from Supabase Storage
         try:

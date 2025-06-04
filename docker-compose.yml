@@ -4,30 +4,14 @@ services:
   app:
     build: .
     ports:
-      - "5000:5000"  # Exposes port 5000 on the host and maps it to port 5000 in the container
-                     # Change the host port (left side) if 5000 is already in use on your machine
-                     # Change the container port (right side) if your Dockerfile EXPOSEs a different port
+      - "5000:5000"  
+                     
     volumes:
-      - .:/app       # Mounts the current directory on the host to /app in the container
-                     # This is useful for development to see code changes live (server may need restart/hot-reload)
-    # env_file:
-    #   - .env         # Uncomment to load environment variables from a .env file
-    # environment:
-    #   - FLASK_ENV=development # Example environment variable
-    #   - OTHER_VARIABLE=value
+      - .:/app       
+                     
+    env_file:
+      - .env        
+    environment:
+      - FLASK_ENV=development 
+      - OTHER_VARIABLE=value
 
-# You can add other services here, like a database, Redis, etc.
-# Example for a PostgreSQL database:
-#  db:
-#    image: postgres:13
-#    volumes:
-#      - postgres_data:/var/lib/postgresql/data/
-#    ports:
-#      - "5432:5432"
-#    environment:
-#      - POSTGRES_USER=youruser
-#      - POSTGRES_PASSWORD=yourpassword
-#      - POSTGRES_DB=yourdb
-
-# volumes:
-#  postgres_data: # Defines a named volume for persisting database data 
