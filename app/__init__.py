@@ -1,6 +1,8 @@
 from flask import Flask, request
 import logging
 import sys
+import os
+
 from .main import main_bp
 from .userPortal.documents import upload_bp
 from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
@@ -10,34 +12,42 @@ from .userPortal.credits import credits_bp
 from .extensions import init_supabase
 from .secrets import get_secret
 
+
 def create_app():
     app = Flask(__name__)
 
+    # Load secrets from AWS Secrets Manager
     secret_name = "userPortal"
     region_name = "us-east-1"
     secrets = get_secret(secret_name, region_name)
+
+    # Inject secrets into app config and env
     for key, value in secrets.items():
         app.config[key] = value
-        
+        os.environ[key] = value  # ✅ for os.getenv-based access
+
+    # Logging setup
     app.logger.handlers.clear()
-    app.logger.setLevel(logging.INFO) 
-    stream_handler = logging.StreamHandler(sys.stdout) 
+    app.logger.setLevel(logging.INFO)
+    stream_handler = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     stream_handler.setFormatter(formatter)
     app.logger.addHandler(stream_handler)
 
-    init_supabase(app.config)  # Initializes Supabase client with app config
+    # Supabase init using config
+    init_supabase(app.config)
 
+    # Request logging
     @app.before_request
     def log_request_info():
         app.logger.info(f"Incoming Request: {request.method} {request.path}")
-        if request.data and request.content_type != 'multipart/form-data': 
+        if request.data and request.content_type != 'multipart/form-data':
             try:
                 if request.content_type == 'application/json':
                     body_preview = str(request.get_json(silent=True) or request.data.decode('utf-8', errors='replace'))[:500]
                     app.logger.info(f"Request Body (JSON): {body_preview}")
                 elif request.form:
-                     app.logger.info(f"Request Form Data: {request.form}")
+                    app.logger.info(f"Request Form Data: {request.form}")
                 else:
                     body_preview = str(request.data[:500])
                     app.logger.info(f"Request Body (Preview): {body_preview}")
@@ -49,9 +59,12 @@ def create_app():
         app.logger.info(f"Outgoing Response: {request.method} {request.path} - Status {response.status_code}")
         return response
 
+    # Register routes
     app.register_blueprint(main_bp)
     app.register_blueprint(upload_bp)
     app.register_blueprint(resume_analyze_bp)
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
+    app.register_blueprint(credits_bp)
+
     return app

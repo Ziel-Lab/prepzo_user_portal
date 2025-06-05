@@ -1,3 +1,4 @@
+import os
 import boto3
 import json
 from botocore.exceptions import ClientError
@@ -17,10 +18,11 @@ def get_secret(secret_name, region_name="us-east-1"):
         print(f"Error fetching secret: {e}")
         raise e
     else:
-        # Secrets Manager decrypts the secret value using the associated KMS CMK
         if 'SecretString' in get_secret_value_response:
-            secret = get_secret_value_response['SecretString']
-            return json.loads(secret)
+            secret_dict = json.loads(get_secret_value_response['SecretString'])
+            for key, value in secret_dict.items():
+                os.environ[key] = value  # ✅ Inject into env
+            return secret_dict
         else:
-            # If your secret is binary, handle it here
+            # Optional: handle binary secrets if you use them
             return get_secret_value_response['SecretBinary']
