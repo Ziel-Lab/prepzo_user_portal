@@ -13,14 +13,14 @@ FRONTEND_URL = os.getenv("FRONTEND_ORIGIN")
 
 
 # Critical check for FRONTEND_URL, especially for production
-if not FRONTEND_URL:
-    # Fallback for local development if .env is missing FRONTEND_ORIGIN
-    if os.getenv("FLASK_ENV") == "development" or os.getenv("FLASK_DEBUG") == "1":
-        FRONTEND_URL = "http://localhost:3000"
-        # Use a simple print here if current_app.logger is not yet available during import
-        print(f"WARNING: [documents/routes.py] FRONTEND_ORIGIN not set, defaulting to {FRONTEND_URL} for CORS (dev mode).")
-    else:
-        raise RuntimeError("CRITICAL: [documents/routes.py] FRONTEND_ORIGIN environment variable is not set. CORS will not be configured correctly.")
+# if not FRONTEND_URL:
+#     # Fallback for local development if .env is missing FRONTEND_ORIGIN
+#     if os.getenv("FLASK_ENV") == "development" or os.getenv("FLASK_DEBUG") == "1":
+#         FRONTEND_URL = "http://localhost:3000"
+#         # Use a simple print here if current_app.logger is not yet available during import
+#         print(f"WARNING: [documents/routes.py] FRONTEND_ORIGIN not set, defaulting to {FRONTEND_URL} for CORS (dev mode).")
+#     else:
+#         raise RuntimeError("CRITICAL: [documents/routes.py] FRONTEND_ORIGIN environment variable is not set. CORS will not be configured correctly.")
 
 print(f"INFO: [documents/routes.py] Configuring CORS for documents blueprint with origin: {FRONTEND_URL}")
 CORS(upload_bp, origins=[FRONTEND_URL], supports_credentials=True,
