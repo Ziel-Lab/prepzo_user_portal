@@ -6,6 +6,7 @@ from app import extensions
 import json
 from dotenv import load_dotenv
 import logging
+import base64 # Added for Data URI conversion
 
 from . import cover_letter_bp 
 
@@ -60,28 +61,80 @@ def create_cover_letter():
     current_user_id = str(user.id)
     
     if not XANO_API_URL_COVER_LETTER:
-        logger.critical("XANO_API_URL_COVER_LETTER is not configured within the create_cover_letter route!")
+        logger.critical(f"User {current_user_id}: XANO_API_URL_COVER_LETTER is not configured!")
         return jsonify({"error": "Server configuration error: Missing API URL."}), 500
 
     try:
         data = request.form
-        current_resume_url = data.get("current_resume")
+        current_resume_url_from_form = data.get("current_resume") # Original Supabase URL
         job_description_text = data.get("job_description")
         company_website_text = data.get("company_website")
         user_additional_comments_text = data.get("additional_comments")
 
-        if not all([current_resume_url, job_description_text]):
-            logger.warning(f"User {current_user_id} called /create-cover-letter with missing fields.")
+        if not all([current_resume_url_from_form, job_description_text]):
+            logger.warning(f"User {current_user_id} called /create-cover-letter with missing fields: current_resume_url or job_description.")
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
+        # --- Logic to determine if resume is PDF URL or needs Data URI ---
+        document_type = None
+        resume_id_from_db = None # Optional, can be useful for linking if needed later
+        try:
+            logger.info(f"User {current_user_id}: Fetching document_type for resume URL: {current_resume_url_from_form}")
+            doc_query_response = extensions.supabase.table("user_documents") \
+                .select("id, document_type") \
+                .eq("document_url", current_resume_url_from_form) \
+                .eq("uid", current_user_id) \
+                .single() \
+                .execute()
+            
+            if doc_query_response.data:
+                resume_id_from_db = doc_query_response.data.get("id")
+                document_type = doc_query_response.data.get("document_type")
+                logger.info(f"User {current_user_id}: Found document in DB. ID: {resume_id_from_db}, Type: {document_type}, URL: {current_resume_url_from_form}")
+                if not document_type:
+                    logger.error(f"User {current_user_id}: Document type (mimetype) is null in DB for resume URL: {current_resume_url_from_form}.")
+                    return jsonify({"error": "Could not determine the file type of the resume from database."}), 400
+            else:
+                logger.warning(f"User {current_user_id}: Resume document not found in user_documents for URL: {current_resume_url_from_form} or does not belong to user.")
+                return jsonify({"error": "Resume document not found or access denied for the provided URL."}), 404
+        
+        except Exception as e_db_query:
+            logger.error(f"User {current_user_id}: Error querying user_documents for URL {current_resume_url_from_form}: {str(e_db_query)}", exc_info=True)
+            return jsonify({"error": "Failed to verify resume document due to a database error."}), 500
+
+        data_for_xano_resume = ""
+        if document_type == "application/pdf":
+            data_for_xano_resume = current_resume_url_from_form
+            logger.info(f"User {current_user_id}: Sending PDF resume URL to Xano for cover letter: {current_resume_url_from_form}")
+        else:
+            logger.info(f"User {current_user_id}: Resume document type is {document_type}. Attempting to download and convert to Data URI for Xano.")
+            try:
+                file_response = requests.get(current_resume_url_from_form, timeout=30) 
+                file_response.raise_for_status() 
+                file_content = file_response.content
+                base64_encoded_content = base64.b64encode(file_content).decode('utf-8')
+                data_for_xano_resume = f"data:{document_type};base64,{base64_encoded_content}"
+                logger.info(f"User {current_user_id}: Successfully created Data URI for resume (type {document_type}). Length: {len(data_for_xano_resume)}.")
+            except requests.exceptions.RequestException as re:
+                logger.error(f"User {current_user_id}: Failed to download resume file from URL {current_resume_url_from_form} for Data URI conversion. Error: {str(re)}", exc_info=True)
+                return jsonify({"error": f"Failed to download resume file from URL: {str(re)}"}), 500
+            except Exception as e_conv:
+                logger.error(f"User {current_user_id}: Error during Data URI conversion for resume {current_resume_url_from_form}. Error: {str(e_conv)}", exc_info=True)
+                return jsonify({"error": "Failed to convert resume file for cover letter generation."}), 500
+        
+        if not data_for_xano_resume: 
+            logger.error(f"User {current_user_id}: data_for_xano_resume is unexpectedly empty after processing {current_resume_url_from_form}.")
+            return jsonify({"error": "Internal error preparing resume data for cover letter generation."}), 500
+        # --- End of resume data preparation ---
+
         xano_payload = {
-            "current_resume": current_resume_url,
+            "current_resume": data_for_xano_resume, # This is now either URL or Data URI
             "job_description": job_description_text,
             "company_website": company_website_text,
             "additional_comments": user_additional_comments_text
         }
 
-        logger.info(f"User {current_user_id} sending payload to Xano for cover letter: {json.dumps(xano_payload)[:200]}...")
+        logger.info(f"User {current_user_id} sending payload to Xano for cover letter. Resume part: {str(data_for_xano_resume)[:100] if document_type == 'application/pdf' else 'Data URI (content omitted)'}...")
         xano_response = requests.post(XANO_API_URL_COVER_LETTER, json=xano_payload, timeout=120)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
@@ -107,9 +160,10 @@ def create_cover_letter():
             "uid": current_user_id,
             "job_description": job_description_text,
             "company_website": company_website_text,
-            "current_resume": current_resume_url,
+            "current_resume": current_resume_url_from_form, # Store the original Supabase URL
             "additional_comments": user_additional_comments_text, 
-            "feedback": parsed_feedback_from_xano 
+            "feedback": parsed_feedback_from_xano,
+            "resume_id": resume_id_from_db # Storing the resume_id from user_documents
         }
 
         try:
