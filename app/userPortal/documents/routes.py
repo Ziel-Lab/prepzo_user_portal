@@ -9,8 +9,6 @@ import logging
 
 load_dotenv()
 
-# FRONTEND_URL for CORS must be available when this module is imported.
-# It will be sourced from an environment variable (set by Docker/EC2, potentially from Secrets Manager).
 FRONTEND_URL = os.getenv("FRONTEND_ORIGIN") 
 
 
