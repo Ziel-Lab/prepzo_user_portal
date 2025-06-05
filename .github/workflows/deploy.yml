@@ -34,10 +34,11 @@ jobs:
           ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
         run: |
-          docker build --build-arg AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-                       --build-arg AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-                       --build-arg AWS_REGION="${{ secrets.AWS_REGION }}" \
-                       -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker build \
+            --build-arg AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            --build-arg AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            --build-arg AWS_REGION="${{ secrets.AWS_REGION }}" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
       - name: Deploy to EC2 with rollback
@@ -58,7 +59,8 @@ jobs:
             echo "📦 Starting deploy for image: $IMAGE_TAG"
 
             echo "🔐 Logging in to ECR..."
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+              | docker login --username AWS --password-stdin $ECR_REGISTRY
 
             if [ -f ~/previous_image_tag.txt ]; then
               PREVIOUS_IMAGE_TAG=$(cat ~/previous_image_tag.txt)
@@ -69,11 +71,11 @@ jobs:
             echo "📥 Pulling new image..."
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-            if lsof -i tcp:$PORT; then
-              echo "⚠️ Port $PORT is in use. Killing the process..."
-              fuser -k ${PORT}/tcp || true
-            fi
+            # Kill any process on port 5000 (no lsof dependency)
+            echo "⚠️ Killing whatever is using port $PORT..."
+            sudo fuser -k ${PORT}/tcp || true
 
+            # Stop & remove the old container (if it exists)
             docker rm -f $CONTAINER_NAME || true
 
             echo "🚀 Running new container..."
@@ -84,6 +86,7 @@ jobs:
 
             echo "🩺 Health check..."
             sleep 5
+
             if curl -f http://localhost:$PORT/health; then
               echo "$IMAGE_TAG" > ~/previous_image_tag.txt
               echo "✅ Deployment successful.🔥"
