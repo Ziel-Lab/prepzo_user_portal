@@ -8,13 +8,14 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
+
       - name: Determine short SHA
         id: vars
-        run: echo "sha_short=${GITHUB_SHA::7}" >>"$GITHUB_OUTPUT"
+        run: echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -33,7 +34,10 @@ jobs:
           ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
         run: |
-          docker build --build-arg AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" --build-arg AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" --build-arg AWS_REGION="${{ secrets.AWS_REGION }}" -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker build --build-arg AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+                       --build-arg AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+                       --build-arg AWS_REGION="${{ secrets.AWS_REGION }}" \
+                       -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
       - name: Deploy to EC2 with rollback
@@ -51,40 +55,52 @@ jobs:
             CONTAINER_NAME=prepzo-prod
             PORT=5000
 
-            # Login to ECR
+            echo "📦 Starting deploy for image: $IMAGE_TAG"
+
+            echo "🔐 Logging in to ECR..."
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
 
-            # Check if previous tag file exists for rollback
             if [ -f ~/previous_image_tag.txt ]; then
               PREVIOUS_IMAGE_TAG=$(cat ~/previous_image_tag.txt)
             else
               PREVIOUS_IMAGE_TAG=""
             fi
 
-            # Pull the new image
+            echo "📥 Pulling new image..."
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-            
-            # Forcefully stop and remove the existing container to free up the port
+
+            if lsof -i tcp:$PORT; then
+              echo "⚠️ Port $PORT is in use. Killing the process..."
+              fuser -k ${PORT}/tcp || true
+            fi
+
             docker rm -f $CONTAINER_NAME || true
-            
-            # Deploy new container
-            docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-            
-            # Health-check & rollback
-            sleep 5 
+
+            echo "🚀 Running new container..."
+            docker run -d --restart always \
+              -p 127.0.0.1:$PORT:$PORT \
+              --name $CONTAINER_NAME \
+              $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+            echo "🩺 Health check..."
+            sleep 5
             if curl -f http://localhost:$PORT/health; then
               echo "$IMAGE_TAG" > ~/previous_image_tag.txt
               echo "✅ Deployment successful.🔥"
             else
               echo "❌ Health check failed. Rolling back..."
+
               docker rm -f $CONTAINER_NAME || true
+
               if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
+                echo "⏪ Rolling back to $PREVIOUS_IMAGE_TAG"
                 docker run -d --restart always \
                   -p 127.0.0.1:$PORT:$PORT \
                   --name $CONTAINER_NAME \
                   $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
               else
-                echo "⚠️ No previous image to roll back to."
+                echo "⚠️ No previous image found for rollback."
               fi
+
               exit 1
             fi
