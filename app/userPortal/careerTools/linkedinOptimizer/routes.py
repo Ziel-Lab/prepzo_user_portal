@@ -79,7 +79,8 @@ def get_linkedin_optimizer_history():
         print(f"Error fetching from linkedin_optimizer table: {str(e)}")
         return jsonify({"error": f"Could not retrieve linkedin optimizer history: {str(e)}"}), 500
 
-@linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST"])
+@linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "OPTIONS"])
 def create_linkedin_optimization():
     user, error_response, status_code = get_authenticated_user()
     if error_response:

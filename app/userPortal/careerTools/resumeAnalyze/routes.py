@@ -39,6 +39,7 @@ def get_authenticated_user():
         return None, jsonify({"error": f"Authentication failed: {str(e)}"}), 401
 
 @resume_analyze_bp.route("/analyze-resume", methods=["POST", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "OPTIONS"])
 def analyze_resume():
     if request.method == "OPTIONS":
         return "", 204
@@ -132,6 +133,7 @@ def analyze_resume():
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 
 @resume_analyze_bp.route("/get-analyze-resume", methods=["GET", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["GET", "OPTIONS"])
 def get_analyze_resume():
     if request.method == "OPTIONS":
         return "", 204  

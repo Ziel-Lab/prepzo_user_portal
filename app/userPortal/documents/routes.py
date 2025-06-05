@@ -55,6 +55,7 @@ def get_authenticated_user():
         return None, jsonify({"error": f"Authentication failed: {str(e)}"}), 401
 
 @upload_bp.route("/upload-document", methods=["POST", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "OPTIONS"])
 def upload_document():
     if request.method == "OPTIONS":
         return "", 204
@@ -121,6 +122,7 @@ def upload_document():
         return jsonify({"error": "Failed to upload document due to a server error."}), 500
 
 @upload_bp.route("/get-documents", methods=["GET", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["GET", "OPTIONS"])
 def get_documents():
     if request.method == "OPTIONS":
         return "", 204

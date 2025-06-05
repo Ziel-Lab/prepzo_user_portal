@@ -38,6 +38,7 @@ def get_authenticated_user():
         return None, jsonify({"error": f"Authentication failed: {str(e)}"}), 401
 
 @cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "OPTIONS"])
 def create_cover_letter():
     if request.method == "OPTIONS":
         return "", 204
@@ -138,6 +139,7 @@ def create_cover_letter():
 
 
 @cover_letter_bp.route("/get-cover-letters", methods=["GET", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["GET", "OPTIONS"])
 def get_cover_letters():
     if request.method == "OPTIONS":
         return "", 204
