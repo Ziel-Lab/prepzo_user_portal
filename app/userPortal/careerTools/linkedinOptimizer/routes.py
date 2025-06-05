@@ -6,11 +6,11 @@ from app import extensions
 import json
 import logging # Standard import for fallback logger
 from gotrue.errors import AuthApiError
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 
 from . import linkedin_optimizer_bp
 
-load_dotenv() 
+# load_dotenv() 
 FRONTEND_URL = os.getenv("FRONTEND_ORIGIN")
 XANO_API_URL_LINKEDIN_OPTIMIZER = os.getenv("XANO_API_URL_LINKEDIN_OPTIMIZER")
 
