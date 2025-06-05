@@ -67,7 +67,7 @@ jobs:
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
             docker stop $CONTAINER_NAME || true
             docker rm $CONTAINER_NAME || true
-            docker run -d --restart always -p $PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
             
             # Health-check & rollback
             sleep 5 
@@ -80,7 +80,7 @@ jobs:
               docker rm   $CONTAINER_NAME || true
               if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
                 docker run -d --restart always \
-                  -p $PORT:$PORT \
+                  -p 127.0.0.1:$PORT:$PORT \
                   --name $CONTAINER_NAME \
                   $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
               else
