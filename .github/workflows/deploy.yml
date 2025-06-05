@@ -51,32 +51,43 @@ jobs:
             CONTAINER_NAME=prepzo-prod
             PORT=5000
 
-            echo "Deploying image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+            echo "--- Deploying image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ---"
 
             # Login to ECR
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
 
-            # Check if previous tag file exists
+            # Check if previous tag file exists for rollback
             if [ -f ~/previous_image_tag.txt ]; then
               PREVIOUS_IMAGE_TAG=$(cat ~/previous_image_tag.txt)
             else
               PREVIOUS_IMAGE_TAG=""
             fi
 
-            # Deploy new container
+            # Pull the new image
+            echo "--- Pulling new Docker image... ---"
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+            # Forcefully stop and remove the existing container to free up the port
+            echo "--- Stopping and removing old container (if it exists)... ---"
             docker rm -f $CONTAINER_NAME || true
+
+            # Deploy new container
+            echo "--- Starting new container... ---"
             docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
             
             # Health-check & rollback
+            echo "--- Health checking new container... ---"
             sleep 5 
             if curl -f http://localhost:$PORT/health; then
               echo "$IMAGE_TAG" > ~/previous_image_tag.txt
+              echo "--- Container is healthy. Reloading Nginx... ---"
+              sudo systemctl reload nginx
               echo "✅ Deployment successful.🔥"
             else
               echo "❌ Health check failed. Rolling back..."
               docker rm -f $CONTAINER_NAME || true
               if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
+                echo "--- Rolling back to previous image: $PREVIOUS_IMAGE_TAG ---"
                 docker run -d --restart always \
                   -p 127.0.0.1:$PORT:$PORT \
                   --name $CONTAINER_NAME \
@@ -84,4 +95,5 @@ jobs:
               else
                 echo "⚠️ No previous image to roll back to."
               fi
+              exit 1
             fi
