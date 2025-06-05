@@ -65,8 +65,7 @@ jobs:
 
             # Deploy new container
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-            docker stop $CONTAINER_NAME || true
-            docker rm $CONTAINER_NAME || true
+            docker rm -f $CONTAINER_NAME || true
             docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
             
             # Health-check & rollback
@@ -76,8 +75,7 @@ jobs:
               echo "✅ Deployment successful.🔥"
             else
               echo "❌ Health check failed. Rolling back..."
-              docker stop $CONTAINER_NAME || true
-              docker rm   $CONTAINER_NAME || true
+              docker rm -f $CONTAINER_NAME || true
               if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
                 docker run -d --restart always \
                   -p 127.0.0.1:$PORT:$PORT \
