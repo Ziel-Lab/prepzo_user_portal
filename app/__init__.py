@@ -6,6 +6,7 @@ from .userPortal.documents import upload_bp
 from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
 from .userPortal.careerTools.coverLetter import cover_letter_bp
 from .userPortal.careerTools.linkedinOptimizer import linkedin_optimizer_bp
+from .userPortal.credits import credits_bp
 from .extensions import init_supabase
 from .secrets import get_secret
 

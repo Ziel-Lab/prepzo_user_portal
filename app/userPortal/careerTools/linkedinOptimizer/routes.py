@@ -1,16 +1,24 @@
 from flask import request, jsonify, current_app
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 import requests 
 import os
 from app import extensions 
 import json
 import logging 
 from gotrue.errors import AuthApiError
+from dotenv import load_dotenv
 
 
 from . import linkedin_optimizer_bp
 
-CORS(linkedin_optimizer_bp, origins=["*"], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
+load_dotenv()
+FRONTEND_URL = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+XANO_API_URL_LINKEDIN_OPTIMIZER = os.getenv("XANO_API_URL_LINKEDIN_OPTIMIZER")
+
+print(f"[linkedinOptimizer/routes.py] FRONTEND_URL for CORS: {FRONTEND_URL}") # Logging FRONTEND_URL
+
+# Temporarily set to be very permissive for debugging CORS
+CORS(linkedin_optimizer_bp, origins=[FRONTEND_URL], supports_credentials=True, methods=["POST", "GET", "OPTIONS"]) 
 
 def get_authenticated_user():
     """Helper to extract and validate JWT token and return user object."""
@@ -49,7 +57,8 @@ def get_authenticated_user():
         )
         return None, jsonify({"error": f"An unexpected authentication error occurred: {str(e)}"}), 401
 
-@linkedin_optimizer_bp.route("/linkedin-optimizer/history", methods=["GET"])
+@linkedin_optimizer_bp.route("/linkedin-optimizer/history", methods=["GET", "OPTIONS"])
+@cross_origin(origins=[FRONTEND_URL], supports_credentials=True, methods=["GET", "OPTIONS"])
 def get_linkedin_optimizer_history():
     user, error_response, status_code = get_authenticated_user()
     if error_response:
