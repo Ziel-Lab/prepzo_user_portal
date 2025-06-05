@@ -142,23 +142,34 @@ def create_linkedin_optimization():
         xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload, timeout=120) 
         xano_response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
         
-        api_data = None
+        raw_xano_response_data = None
         try:
-            # Standard way to parse JSON response
-            api_data = xano_response.json()
-        except requests.exceptions.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON response from Xano LinkedIn Optimizer for user {current_user_id}. Status: {xano_response.status_code}. Response text: {xano_response.text[:500]}", exc_info=True)
+            raw_xano_response_data = xano_response.json()
+        except requests.exceptions.JSONDecodeError as e: # If Xano response is not JSON at all
+            logger.error(f"Failed to decode initial JSON response from Xano LinkedIn Optimizer for user {current_user_id}. Status: {xano_response.status_code}. Response text: {xano_response.text[:500]}", exc_info=True)
             return jsonify({"error": "Invalid JSON response from optimization service."}), 500
-        
-        if not isinstance(api_data, dict): 
-            logger.error(f"Xano LinkedIn Optimizer response was not a JSON object (dictionary) for user {current_user_id}. Type: {type(api_data)}. Data: {str(api_data)[:500]}")
+
+        api_data = None
+        if isinstance(raw_xano_response_data, str):
+            logger.info(f"Xano response parsed to a string for user {current_user_id}. Attempting to parse string content as JSON.")
+            try:
+                api_data = json.loads(raw_xano_response_data)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to decode JSON string returned by Xano for user {current_user_id}. String was: {raw_xano_response_data[:500]}", exc_info=True)
+                return jsonify({"error": "Invalid JSON content in string from optimization service."}), 500
+        elif isinstance(raw_xano_response_data, dict):
+            api_data = raw_xano_response_data
+        else:
+            logger.error(f"Xano LinkedIn Optimizer response was not a dictionary or a parsable JSON string for user {current_user_id}. Type: {type(raw_xano_response_data)}. Data: {str(raw_xano_response_data)[:500]}")
             return jsonify({"error": "Optimization service returned an unexpected data format."}), 500
+        
+        if not isinstance(api_data, dict): # Final check, should be redundant if logic above is correct
+            logger.error(f"api_data is not a dictionary after all parsing attempts for user {current_user_id}. Type: {type(api_data)}. Data: {str(api_data)[:500]}")
+            return jsonify({"error": "Failed to obtain valid JSON object from optimization service after parsing."}), 500
 
         if not api_data: 
-             logger.warning(f"Xano LinkedIn Optimizer API returned empty data object for user {current_user_id}. API Data: {api_data}")
-             # Consider if an empty dict is an error or a valid (e.g., "nothing to optimize") response.
-             # For now, treating it as potentially problematic if content was expected.
-             return jsonify({"error": "Optimization service returned empty data."}), 500 # Or 200 with a specific message if empty is OK.
+             logger.warning(f"Xano LinkedIn Optimizer API returned empty data object for user {current_user_id} after parsing. API Data: {api_data}")
+             return jsonify({"error": "Optimization service returned empty data."}), 500
 
         user_display_name = (user.user_metadata.get('full_name') or
                              user.user_metadata.get('name') or
@@ -167,7 +178,7 @@ def create_linkedin_optimization():
 
         insert_data = {
             "uid": current_user_id,
-            "display_name": user_display_name, 
+            "display name": user_display_name,
             "linkedin_url": linkedin_url,
             "comments": comments,
             "api_response": api_data 
