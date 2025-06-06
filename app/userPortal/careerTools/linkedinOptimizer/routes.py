@@ -73,6 +73,13 @@ def get_linkedin_optimizer_history():
 @linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST", "OPTIONS"])
 def create_linkedin_optimization():
     user, error_response, status_code = get_authenticated_user()
+    if request.method == "OPTIONS":
+        response = jsonify({'status': 'ok'})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+        return response, 200
+
     if error_response:
         return error_response, status_code
     
