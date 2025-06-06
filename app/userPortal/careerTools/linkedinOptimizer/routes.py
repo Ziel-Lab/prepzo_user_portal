@@ -96,7 +96,7 @@ def create_linkedin_optimization():
         xano_payload = {"linkedin_url": linkedin_url, "comments": comments}
         logging.info(f"Sending payload to Xano: {json.dumps(xano_payload)}") 
 
-        xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload, timeout=60) 
+        xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload) 
         xano_response.raise_for_status() 
         
         xano_response_text = xano_response.text
