@@ -23,16 +23,11 @@ def create_app():
             app.config[key] = value
     
     # Centralized CORS Configuration
-    frontend_url = app.config.get('FRONTEND_URL')
-    origins = ["http://localhost:3000"]
-    if frontend_url:
-        origins.append(frontend_url)
-    
-    CORS(app, 
-         origins=origins, 
+    CORS(app,
+         origins=["https://prepzo-client-git-dev-prepzo.vercel.app"],
          supports_credentials=True,
-         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-         methods=["GET", "POST", "OPTIONS", "DELETE", "PATCH"])
+         allow_headers=["Content-Type", "Authorization"],
+         methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"])
 
     # Logging setup
     app.logger.handlers.clear()
