@@ -21,7 +21,7 @@ def require_authentication(f):
         if request.method == 'OPTIONS':
             response = make_response()
             response.headers.add("Access-Control-Allow-Origin", "https://prepzo-client-git-dev-prepzo.vercel.app")
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,access-control-allow-origin')
             response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE')
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
