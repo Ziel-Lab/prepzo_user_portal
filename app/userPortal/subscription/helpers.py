@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta
-from flask import jsonify, g, request, current_app
+from flask import jsonify, g, request, current_app, make_response
 from app import extensions 
 from functools import wraps
 import calendar
@@ -12,15 +12,21 @@ class QuotaExceededError(Exception):
 def require_authentication(f):
     """
     More robust decorator to protect routes and set g.user.
+    - Handles CORS preflight OPTIONS requests manually.
     - Fails early if Authorization header is missing or malformed.
     - Uses the low-level Supabase API to avoid 204 response quirks.
-    - Allows pre-flight OPTIONS requests to pass through for CORS.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Allow OPTIONS requests to pass through for CORS pre-flight
         if request.method == 'OPTIONS':
-            return f(*args, **kwargs)
+            response = make_response()
+            frontend_url = current_app.config.get('FRONTEND_URL')
+            if frontend_url:
+                response.headers.add("Access-Control-Allow-Origin", frontend_url)
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response
 
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
