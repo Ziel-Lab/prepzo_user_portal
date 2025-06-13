@@ -18,6 +18,14 @@ def require_authentication(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        if request.method == 'OPTIONS':
+            response = make_response()
+            response.headers.add("Access-Control-Allow-Origin", "https://prepzo-client-git-dev-prepzo.vercel.app")
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response
+
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             current_app.logger.warning(f"Bad or missing Authorization header received: {auth_header!r}")
