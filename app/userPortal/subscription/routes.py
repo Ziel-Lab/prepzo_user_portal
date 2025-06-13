@@ -8,7 +8,7 @@ from .helpers import check_and_use_feature, get_last_day_of_month, require_authe
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
 
-@subscription_bp.route("/status", methods=["GET"])
+@subscription_bp.route("/status", methods=["GET", "OPTIONS"])
 @require_authentication
 def get_subscription_status():
     """
@@ -116,7 +116,7 @@ def create_checkout_session():
         current_app.logger.error(f"Stripe checkout session creation failed: {e}")
         return jsonify({'error': str(e)}), 500
 
-@subscription_bp.route("/stripe/cancel-subscription", methods=["POST"])
+@subscription_bp.route("/stripe/cancel-subscription", methods=["POST", "OPTIONS"])
 @require_authentication
 def cancel_subscription():
     """Cancels a user's active paid subscription via Stripe."""
@@ -154,7 +154,7 @@ def cancel_subscription():
         current_app.logger.error(f"Stripe subscription cancellation failed: {e}")
         return jsonify({'error': str(e)}), 500
 
-@subscription_bp.route("/stripe/webhook", methods=["POST"])
+@subscription_bp.route("/stripe/webhook", methods=["POST", "OPTIONS"])
 def stripe_webhook():
     """Handles incoming webhooks from Stripe to update subscription status in the DB."""
     stripe_webhook_secret = current_app.config.get("STRIPE_WEBHOOK_SECRET")
@@ -318,6 +318,7 @@ def stripe_webhook():
     return jsonify(success=True)
 
 @subscription_bp.route("/protected/resume-analyzer", methods=["POST"])
+@require_authentication
 @check_and_use_feature('resume', increment_by=1)
 def analyze_resume_example():
     # If the code reaches here, the user has quota and it has been decremented.

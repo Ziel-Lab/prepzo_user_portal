@@ -9,7 +9,7 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 
 from . import linkedin_optimizer_bp
 
-@linkedin_optimizer_bp.route("/linkedin-optimizer/history", methods=["GET"])
+@linkedin_optimizer_bp.route("/linkedin-optimizer/history", methods=["GET", "OPTIONS"])
 @require_authentication
 def get_linkedin_optimizer_history():
     current_user_id = str(g.user.id)
@@ -27,7 +27,7 @@ def get_linkedin_optimizer_history():
         print(f"Error fetching from linkedin_optimizer table: {str(e)}")
         return jsonify({"error": f"Could not retrieve linkedin optimizer history: {str(e)}"}), 500
 
-@linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST"])
+@linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST","OPTIONS"])
 @require_authentication
 @check_and_use_feature('linkedin_optimize')
 def create_linkedin_optimization():

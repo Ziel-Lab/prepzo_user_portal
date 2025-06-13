@@ -7,7 +7,7 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 
 from . import cover_letter_bp 
 
-@cover_letter_bp.route("/create-cover-letter", methods=["POST"])
+@cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
 @require_authentication
 @check_and_use_feature('cover_letter')
 def create_cover_letter():
@@ -97,7 +97,7 @@ def create_cover_letter():
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 
 
-@cover_letter_bp.route("/get-cover-letters", methods=["GET"])
+@cover_letter_bp.route("/get-cover-letters", methods=["GET", "OPTIONS"])
 @require_authentication
 def get_cover_letters():
     current_user_id = str(g.user.id)

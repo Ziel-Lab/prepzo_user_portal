@@ -7,7 +7,7 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 
 from . import resume_analyze_bp 
 
-@resume_analyze_bp.route("/analyze-resume", methods=["POST"])
+@resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
 @require_authentication
 @check_and_use_feature('resume')
 def analyze_resume():
@@ -95,7 +95,7 @@ def analyze_resume():
         current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 
-@resume_analyze_bp.route("/get-analyze-resume", methods=["GET"])
+@resume_analyze_bp.route("/get-analyze-resume", methods=["GET", "OPTIONS"])
 @require_authentication
 def get_analyze_resume():
     current_user_id = str(g.user.id)
@@ -113,7 +113,7 @@ def get_analyze_resume():
         return jsonify({"error": f"Could not retrieve analyzed resume data: {str(e)}"}), 500
         
 
-@resume_analyze_bp.route("/roast-resume", methods=["POST"])
+@resume_analyze_bp.route("/roast-resume", methods=["POST", "OPTIONS"])
 @require_authentication
 @check_and_use_feature('resume')
 def roast_resume():
