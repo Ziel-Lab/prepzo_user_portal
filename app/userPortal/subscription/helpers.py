@@ -20,9 +20,7 @@ def require_authentication(f):
     def decorated_function(*args, **kwargs):
         if request.method == 'OPTIONS':
             response = make_response()
-            frontend_url = current_app.config.get('FRONTEND_URL')
-            if frontend_url:
-                response.headers.add("Access-Control-Allow-Origin", frontend_url)
+            response.headers.add("Access-Control-Allow-Origin", "*")
             response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
             response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE')
             response.headers.add('Access-Control-Allow-Credentials', 'true')
