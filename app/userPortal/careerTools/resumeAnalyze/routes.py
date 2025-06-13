@@ -1,6 +1,5 @@
 from flask import request, jsonify, current_app, g
 import requests 
-import os
 from app import extensions 
 import magic
 import json
