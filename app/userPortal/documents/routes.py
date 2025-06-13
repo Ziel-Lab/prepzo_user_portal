@@ -1,12 +1,8 @@
 from flask import Blueprint, request, jsonify
-from flask_cors import CORS
 import os
 import magic
 from app import extensions
 from . import upload_bp 
-
-CORS(upload_bp, origins=["*"], supports_credentials=True,
-     methods=["POST", "GET", "OPTIONS", "DELETE", "PATCH"])
 
 SUPABASE_BUCKET = "user-documents"
 

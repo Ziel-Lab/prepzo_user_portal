@@ -22,7 +22,16 @@ def create_app():
             app.config[key] = value
     
     # Centralized CORS Configuration
-    CORS(app, supports_credentials=True)
+    frontend_url = app.config.get('FRONTEND_URL')
+    origins = ["http://localhost:3000"]
+    if frontend_url:
+        origins.append(frontend_url)
+    
+    CORS(app, 
+         origins=origins, 
+         supports_credentials=True,
+         allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+         methods=["GET", "POST", "OPTIONS", "DELETE", "PATCH"])
 
     # Logging setup
     app.logger.handlers.clear()
