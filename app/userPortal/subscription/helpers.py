@@ -14,9 +14,14 @@ def require_authentication(f):
     More robust decorator to protect routes and set g.user.
     - Fails early if Authorization header is missing or malformed.
     - Uses the low-level Supabase API to avoid 204 response quirks.
+    - Allows pre-flight OPTIONS requests to pass through for CORS.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Allow OPTIONS requests to pass through for CORS pre-flight
+        if request.method == 'OPTIONS':
+            return f(*args, **kwargs)
+
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             current_app.logger.warning(f"Bad or missing Authorization header received: {auth_header!r}")
