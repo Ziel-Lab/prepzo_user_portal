@@ -1,41 +1,17 @@
-from flask import request, jsonify, current_app
-from flask_cors import CORS
+from flask import request, jsonify, current_app, g
 import requests 
-import os
 from app import extensions 
 import json
+from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 
 
 from . import cover_letter_bp 
 
-CORS(cover_letter_bp, origins=["*"], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
-
-def get_authenticated_user():
-    """Helper to extract and validate JWT token and return user object."""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return None, jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-    jwt_token = auth_header.split(" ")[1]
-    try:
-        user_response = extensions.supabase.auth.get_user(jwt=jwt_token)
-        user = user_response.user
-        if not user or not user.id:
-            return None, jsonify({"error": "Invalid token or user not found"}), 401
-        return user, None, None  
-    except Exception as e:
-        return None, jsonify({"error": f"Authentication failed: {str(e)}"}), 401
-
-@cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
+@cover_letter_bp.route("/create-cover-letter", methods=["POST"])
+@require_authentication
+@check_and_use_feature('cover_letter')
 def create_cover_letter():
-    if request.method == "OPTIONS":
-        return "", 204
-        
-    user, error_response, status_code = get_authenticated_user()
-    if error_response:
-        return error_response, status_code
-
-    current_user_id = str(user.id)
+    current_user_id = str(g.user.id)
 
     frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
     xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
@@ -98,14 +74,14 @@ def create_cover_letter():
 
 
         if parsed_feedback_from_xano and "error" not in parsed_feedback_from_xano:
-            return jsonify(parsed_feedback_from_xano), xano_response.status_code
+            return jsonify(parsed_feedback_from_xano), 200
         else: 
             error_detail_for_client = parsed_feedback_from_xano if parsed_feedback_from_xano else {"error": "Processing Xano response failed"}
             return jsonify({"message": "Xano request processed, but there was an issue with feedback content.", 
                             "xano_response_status": xano_response.status_code,
                             "details": error_detail_for_client,
-                            "full_xano_response_preview": xano_data if 'feedback' not in xano_data else {k:v for k,v in xano_data.items() if k != 'feedback'} # Avoid sending large string back again
-                           }), 200 
+                            "full_xano_response_preview": xano_data if 'feedback' not in xano_data else {k:v for k,v in xano_data.items() if k != 'feedback'}
+                           }), 207
 
 
     except requests.exceptions.HTTPError as http_err:
@@ -121,17 +97,10 @@ def create_cover_letter():
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 
 
-@cover_letter_bp.route("/get-cover-letters", methods=["GET", "OPTIONS"])
+@cover_letter_bp.route("/get-cover-letters", methods=["GET"])
+@require_authentication
 def get_cover_letters():
-    if request.method == "OPTIONS":
-        return "", 204
-
-    user, error_response, status_code = get_authenticated_user()
-    if error_response:
-        return error_response, status_code
-    current_user_id = str(user.id)
-    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
-    xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
+    current_user_id = str(g.user.id)
     try:
         query_response = (
             extensions.supabase.table("cover_letter")

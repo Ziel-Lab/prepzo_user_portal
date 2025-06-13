@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-load_dotenv() # Load environment variables from .env file
+# load_dotenv() # Load environment variables from .env file
 
 
 from app.secrets import get_secret

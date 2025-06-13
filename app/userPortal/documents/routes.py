@@ -4,9 +4,6 @@ import os
 import magic
 from app import extensions
 from . import upload_bp 
-from dotenv import load_dotenv
-
-load_dotenv()
 
 CORS(upload_bp, origins=["*"], supports_credentials=True,
      methods=["POST", "GET", "OPTIONS", "DELETE", "PATCH"])

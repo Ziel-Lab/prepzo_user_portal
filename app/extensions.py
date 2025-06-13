@@ -1,22 +1,31 @@
-from supabase import create_client
+from supabase import create_client, ClientOptions
+import logging
+import os
 
 supabase = None
 
-def init_supabase(app_config):
+def init_supabase(app):
     global supabase
-    SUPABASE_URL = app_config.get("SUPABASE_URL")
-    SUPABASE_KEY = app_config.get("SUPABASE_SERVICE_ROLE_KEY")
+    logger = app.logger 
+
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("Error: SUPABASE_URL or SUPABASE_KEY is missing. Supabase client NOT initialized.")
+        logger.error("Error: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing from configuration. Supabase client NOT initialized.")
         return
 
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info(f"Attempting to initialize Supabase client for URL: {SUPABASE_URL}")
+        supabase = create_client(
+            SUPABASE_URL, 
+            SUPABASE_KEY,
+            options=ClientOptions(postgrest_client_timeout=10)
+        )
         if supabase:
-            print("Supabase client initialized successfully.")
+            logger.info("Supabase client initialized successfully.")
         else:
-            print("Supabase client initialization returned None.")
+            logger.error("Supabase client initialization returned None.")
     except Exception as e:
-        print(f"Error during Supabase client initialization: {e}")
+        logger.error(f"FATAL: An exception occurred during Supabase client initialization: {e}", exc_info=True)
         supabase = None # Ensure supabase is None if an error occurs

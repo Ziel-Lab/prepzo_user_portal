@@ -1,48 +1,24 @@
-from flask import request, jsonify, current_app
-from flask_cors import CORS
+from flask import request, jsonify, current_app, g
 import requests 
 import os
 from app import extensions 
 import magic
 import json
-
+from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 
 from . import resume_analyze_bp 
 
-CORS(resume_analyze_bp, origins=["*"], supports_credentials=True, methods=["POST", "OPTIONS", "GET"])
-
-def get_authenticated_user():
-    """Helper to extract and validate JWT token and return user object."""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return None, jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-    jwt_token = auth_header.split(" ")[1]
-    try:
-        user_response = extensions.supabase.auth.get_user(jwt=jwt_token)
-        user = user_response.user
-        if not user or not user.id:
-            return None, jsonify({"error": "Invalid token or user not found"}), 401
-        return user, None, None
-    except Exception as e:
-        return None, jsonify({"error": f"Authentication failed: {str(e)}"}), 401
-
 @resume_analyze_bp.route("/analyze-resume", methods=["POST"])
+@require_authentication
+@check_and_use_feature('resume')
 def analyze_resume():
-    user, error_response, status_code = get_authenticated_user()
-    if error_response:
-        return error_response, status_code
+    current_user_id = str(g.user.id)
+    user_name = g.user.user_metadata.get('name') or \
+                g.user.user_metadata.get('display_name') or \
+                g.user.email or current_user_id
 
-    current_user_id = str(user.id)
-    user_name = user.user_metadata.get('name') or \
-                user.user_metadata.get('display_name') or \
-                user.email or current_user_id
-
-    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
     xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
-    xano_api_url_resume_roast = current_app.config.get("XANO_API_URL_RESUME_ROAST")
-    SUPABASE_BUCKET = "user-documents"
-
+    
     try:
         data = request.form
         current_resume_url = data.get("current_resume") 
@@ -60,6 +36,14 @@ def analyze_resume():
             "additional_comments": additional_comment_text
         }
 
+        # --- Start of Debugging Block ---
+        print("\n--- DEBUGGING: Preparing to send request to Xano ---")
+        print(f"Target Xano URL: {xano_api_url_resume_analyze}")
+        print("Request Payload:")
+        print(json.dumps(xano_payload, indent=2))
+        print("--- End of Debugging Block ---\n")
+        # --- End of Debugging Block ---
+
         xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload)
         xano_response.raise_for_status()
         xano_data = xano_response.json() 
@@ -75,12 +59,12 @@ def analyze_resume():
             if doc_query.data and doc_query.data.get("id"):
                 resume_id_from_db = doc_query.data.get("id")
             else:
-                print(f"Warning: Could not find resume_id for URL: {current_resume_url} and user: {current_user_id}")
+                current_app.logger.warning(f"Warning: Could not find resume_id for URL: {current_resume_url} and user: {current_user_id}")
         except Exception as e:
-            print(f"Error querying for resume_id: {str(e)}")
+            current_app.logger.error(f"Error querying for resume_id: {str(e)}")
            
         db_payload = {
-            "user": current_user_id,
+            "user_id": current_user_id,
             "user_name": user_name,
             "current_resume": current_resume_url, 
             "company_website": company_website, 
@@ -94,9 +78,9 @@ def analyze_resume():
         try:
             insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
             if not insert_response.data:
-                print(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
+                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
         except Exception as e:
-            print(f"Error inserting into analyze_resume table: {str(e)}")
+            current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
 
         return jsonify(xano_data), xano_response.status_code
 
@@ -109,44 +93,36 @@ def analyze_resume():
     except requests.exceptions.RequestException as req_err:
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
+        current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 
 @resume_analyze_bp.route("/get-analyze-resume", methods=["GET"])
+@require_authentication
 def get_analyze_resume():
-    user, error_response, status_code = get_authenticated_user()
-    if error_response:
-        return error_response, status_code
-
-    current_user_id = str(user.id)
-
-    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
-    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
+    current_user_id = str(g.user.id)
 
     try:
         query_response = extensions.supabase.table("analyze_resume") \
             .select("*") \
-            .eq("user", current_user_id) \
+            .eq("user_id", current_user_id) \
             .execute()
 
         return jsonify(query_response.data or []), 200 
         
     except Exception as e:
-        print(f"Error fetching from analyze_resume table: {str(e)}")
+        current_app.logger.error(f"Error fetching from analyze_resume table: {str(e)}")
         return jsonify({"error": f"Could not retrieve analyzed resume data: {str(e)}"}), 500
         
 
 @resume_analyze_bp.route("/roast-resume", methods=["POST"])
+@require_authentication
+@check_and_use_feature('resume')
 def roast_resume():
-    user, error_response, status_code = get_authenticated_user()
-    if error_response:
-        return error_response, status_code
+    current_user_id = str(g.user.id)
+    user_name = g.user.user_metadata.get('name') or \
+                g.user.user_metadata.get('display_name') or \
+                g.user.email or current_user_id
 
-    current_user_id = str(user.id)
-    user_name = user.user_metadata.get('name') or \
-                user.user_metadata.get('display_name') or \
-                user.email or current_user_id
-
-    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
     xano_api_url_resume_roast = current_app.config.get("XANO_API_URL_RESUME_ROAST")
     SUPABASE_BUCKET = "user-documents"
 
@@ -162,21 +138,18 @@ def roast_resume():
                 return jsonify({"error": "No selected file for upload"}), 400
 
             file_bytes = file_to_upload.read()
-            file_to_upload.seek(0)  # Reset stream position after read for magic
+            file_to_upload.seek(0)
 
             flask_mimetype = file_to_upload.mimetype
             final_content_type_for_storage = flask_mimetype
 
-            # Use python-magic for more accurate MIME type detection if not PDF
             if flask_mimetype != 'application/pdf':
                 try:
                     magic_mimetype = magic.from_buffer(file_bytes, mime=True)
                     final_content_type_for_storage = magic_mimetype
                 except Exception as e:
-                    print(f"Roast Resume: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
+                    current_app.logger.warning(f"Roast Resume: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
             
-            # Use filename as path, consistent with documents/routes.py
-            # Consider implications if multiple users upload files with the same name.
             file_storage_path = file_to_upload.filename 
 
             extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
@@ -200,7 +173,7 @@ def roast_resume():
             if doc_insert_response.data and len(doc_insert_response.data) > 0 and doc_insert_response.data[0].get("id"):
                 resume_id_from_db = doc_insert_response.data[0].get("id")
             else:
-                print(f"Warning: Could not get ID from user_documents insert for {resume_url_for_xano}. Response: {doc_insert_response}")
+                current_app.logger.warning(f"Warning: Could not get ID from user_documents insert for {resume_url_for_xano}. Response: {doc_insert_response}")
 
         elif current_resume_url_form:
             resume_url_for_xano = current_resume_url_form
@@ -214,9 +187,9 @@ def roast_resume():
                 if doc_query.data and doc_query.data.get("id"):
                     resume_id_from_db = doc_query.data.get("id")
                 else:
-                    print(f"Warning: Could not find resume_id for existing URL: {resume_url_for_xano} and user: {current_user_id}")
+                    current_app.logger.warning(f"Warning: Could not find resume_id for existing URL: {resume_url_for_xano} and user: {current_user_id}")
             except Exception as e:
-                print(f"Error querying for resume_id for existing URL: {str(e)}")
+                current_app.logger.error(f"Error querying for resume_id for existing URL: {str(e)}")
         else:
             return jsonify({"error": "Missing resume input: provide 'current_resume_url' (form data) or upload a 'file' (multipart)"}), 400
 
@@ -236,15 +209,15 @@ def roast_resume():
                 parsed_inner_json = json.loads(raw_feedback_payload)
                 feedback_content_for_db = parsed_inner_json
             except json.JSONDecodeError as e:
-                print(f"Roast Resume: Error decoding JSON string from 'feedback' key: {e}. Storing raw Xano response object instead.")
+                current_app.logger.warning(f"Roast Resume: Error decoding JSON string from 'feedback' key: {e}. Storing raw Xano response object instead.")
             except TypeError: 
-                print(f"Roast Resume: Value for 'feedback' key was not a string (TypeError). Storing raw Xano response object.")
+                current_app.logger.warning(f"Roast Resume: Value for 'feedback' key was not a string (TypeError). Storing raw Xano response object.")
 
         elif raw_feedback_payload is not None: 
-            print(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
+            current_app.logger.warning(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
 
         db_payload = {
-            "user": current_user_id,
+            "user_id": current_user_id,
             "user_name": user_name,
             "current_resume": resume_url_for_xano,
             "job_description": None, 
@@ -257,9 +230,9 @@ def roast_resume():
         try:
             insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
             if not insert_response.data:
-                print(f"Warning: Supabase insert into analyze_resume (roast) may have failed. Response: {insert_response}")
+                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume (roast) may have failed. Response: {insert_response}")
         except Exception as e:
-            print(f"Error inserting into analyze_resume table (roast): {str(e)}")
+            current_app.logger.error(f"Error inserting into analyze_resume table (roast): {str(e)}")
 
         return jsonify(xano_data), xano_response.status_code
 
@@ -272,5 +245,5 @@ def roast_resume():
     except requests.exceptions.RequestException as req_err:
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
-        print(f"Unexpected error in roast_resume: {str(e)}")
+        current_app.logger.error(f"Unexpected error in roast_resume: {str(e)}")
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500

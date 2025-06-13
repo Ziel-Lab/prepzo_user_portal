@@ -1,61 +1,18 @@
-from flask import request, jsonify, current_app
-from flask_cors import CORS
+from flask import request, jsonify, current_app, g
 import requests 
-import os
 from app import extensions 
 import json
 import logging 
 from gotrue.errors import AuthApiError
+from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 
 
 from . import linkedin_optimizer_bp
 
-CORS(linkedin_optimizer_bp, origins=["*"], supports_credentials=True, methods=["POST", "GET", "OPTIONS"])
-
-def get_authenticated_user():
-    """Helper to extract and validate JWT token and return user object."""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logging.warning("get_authenticated_user: Missing or invalid Authorization header from %s for path %s", request.remote_addr, request.path)
-        return None, jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-    jwt_token = auth_header.split(" ")[1]
-    try:
-        logging.info("get_authenticated_user: Attempting to validate token for user from %s for path %s", request.remote_addr, request.path)
-        user_response = extensions.supabase.auth.get_user(jwt=jwt_token)
-        user = user_response.user
-        if not user or not user.id:
-            logging.warning("get_authenticated_user: Supabase returned no user or user.id for token from %s.", request.remote_addr)
-            return None, jsonify({"error": "Invalid token or user not found"}), 401
-        logging.info("get_authenticated_user: Successfully authenticated user %s from %s.", user.id, request.remote_addr)
-        return user, None, None  
-    except AuthApiError as e:
-        logging.error(
-            "get_authenticated_user: Supabase AuthApiError for user from %s - Status: %s, Message: %s",
-            request.remote_addr,
-            e.status if hasattr(e, 'status') else 'N/A',
-            e.message if hasattr(e, 'message') else str(e),
-            exc_info=True 
-        )
-
-        status_code = e.status if hasattr(e, 'status') and isinstance(e.status, int) and 100 <= e.status <= 599 else 401
-        return None, jsonify({"error": f"Authentication error: {e.message if hasattr(e, 'message') else str(e)}"}), status_code
-    except Exception as e:
-        logging.error(
-            "get_authenticated_user: Generic authentication failure for user from %s: %s",
-            request.remote_addr,
-            str(e),
-            exc_info=True 
-        )
-        return None, jsonify({"error": f"An unexpected authentication error occurred: {str(e)}"}), 401
-
 @linkedin_optimizer_bp.route("/linkedin-optimizer/history", methods=["GET"])
+@require_authentication
 def get_linkedin_optimizer_history():
-    user, error_response, status_code = get_authenticated_user()
-    if error_response:
-        return error_response, status_code
-    
-    current_user_id = str(user.id)
+    current_user_id = str(g.user.id)
 
     try:
         query_response = (
@@ -70,21 +27,11 @@ def get_linkedin_optimizer_history():
         print(f"Error fetching from linkedin_optimizer table: {str(e)}")
         return jsonify({"error": f"Could not retrieve linkedin optimizer history: {str(e)}"}), 500
 
-@linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST", "OPTIONS"])
+@linkedin_optimizer_bp.route("/linkedin-optimizer", methods=["POST"])
+@require_authentication
+@check_and_use_feature('linkedin_optimize')
 def create_linkedin_optimization():
-    user, error_response, status_code = get_authenticated_user()
-    if request.method == "OPTIONS":
-        response = jsonify({'status': 'ok'})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
-        return response, 200
-
-    if error_response:
-        return error_response, status_code
-    
-    current_user_id = str(user.id)
-    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
+    current_user_id = str(g.user.id)
     XANO_API_URL_LINKEDIN_OPTIMIZER = current_app.config.get("XANO_API_URL_LINKEDIN_OPTIMIZER")
     
     data = request.get_json()
@@ -106,46 +53,24 @@ def create_linkedin_optimization():
         xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload) 
         xano_response.raise_for_status() 
         
-        xano_response_text = xano_response.text
-        api_data = None 
-
+        # The new Xano response is a clean JSON object with 'changes' and 'explanation' keys.
+        # This simplifies the parsing logic significantly compared to the old implementation.
         try:
-            parsed_once = json.loads(xano_response_text)
-
-            if isinstance(parsed_once, str):
-                logging.info("Xano response text parsed to a string; attempting to parse string content as JSON.")
-                api_data = json.loads(parsed_once)
-            elif isinstance(parsed_once, dict):
-                api_data = parsed_once
-            else:
-
-                logging.error(f"Xano response parsed to unexpected type: {type(parsed_once)}. Raw: {xano_response_text}")
-                return jsonify({"error": "Invalid or unexpected data format from optimization service."}), 500
-
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse Xano response with json.loads: {e}. Raw: {xano_response_text}")
-            try:
-                logging.info("Attempting fallback parsing with response.json()")
-                api_data = xano_response.json() 
-                if not isinstance(api_data, dict):
-                     logging.error(f"Fallback response.json() did not yield a dict. Type: {type(api_data)}")
-                     return jsonify({"error": "Invalid data format from optimization service after fallback."}), 500
-            except json.JSONDecodeError as e2:
-                logging.error(f"Fallback parsing with response.json() also failed: {e2}. Raw: {xano_response_text}")
-                return jsonify({"error": "Failed to parse response from optimization service. Invalid JSON."}), 500
+            api_data = xano_response.json()
+            if not isinstance(api_data, dict):
+                logging.error(f"Xano response was not a JSON object. Raw: {xano_response.text}")
+                return jsonify({"error": "Invalid data format from optimization service."}), 500
+        except json.JSONDecodeError:
+            logging.error(f"Failed to parse Xano response as JSON. Raw: {xano_response.text}")
+            return jsonify({"error": "Failed to parse response from optimization service."}), 500
         
-        if not isinstance(api_data, dict):
-            logging.error(f"api_data is not a dictionary after parsing attempts. Type: {type(api_data)}. Value: {api_data}")
-            return jsonify({"error": "Failed to obtain valid JSON object from optimization service."}), 500
-
         if not api_data: 
-             logging.warning(f"Xano API returned empty data after parsing: {api_data}")
+             logging.warning(f"Xano API returned empty or null data after parsing.")
+             return jsonify({"error": "Invalid response from optimization service: received empty data."}), 500
 
-             return jsonify({"error": "Invalid response from optimization service: received empty data after parsing."}), 500
-
-        user_display_name = (user.user_metadata.get('full_name') or
-                             user.user_metadata.get('name') or
-                             user.email) 
+        user_display_name = (g.user.user_metadata.get('full_name') or
+                             g.user.user_metadata.get('name') or
+                             g.user.email) 
 
         insert_data = {
             "uid": current_user_id,
@@ -185,7 +110,7 @@ def create_linkedin_optimization():
         print(f"Error calling Xano API: {str(e)}")
         return jsonify({"error": f"Could not connect to optimization service: {str(e)}"}), 503
     except json.JSONDecodeError as e: # Catch issues from json.loads(xano_response_text) specifically
-        print(f"Error parsing Xano API response string: {str(e)}. Response text was: {xano_response_text if 'xano_response_text' in locals() else 'not captured'}")
+        print(f"Error parsing Xano API response string: {str(e)}. Response text was: {xano_response.text if 'xano_response' in locals() else 'not captured'}")
         return jsonify({"error": "Invalid response format from optimization service."}), 500
     except Exception as e: # Catch-all for other unexpected errors
         error_str = str(e)
