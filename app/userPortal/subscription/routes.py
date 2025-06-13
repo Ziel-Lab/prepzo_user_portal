@@ -14,93 +14,62 @@ def get_subscription_status():
     """
     Endpoint for the frontend to get the user's full subscription and usage status.
     If a user has no subscription, it provisions the default 'free' plan for them.
+    This function now uses a clear read-then-write pattern to avoid race conditions.
     """
+    supabase = extensions.supabase
+    uid = g.user.id
+
     try:
-        supabase = extensions.supabase
-        uid = g.user.id
+        # --- READ PHASE ---
+        # Step 1: Attempt to fetch the user's subscription.
+        sub_response = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
+        subscription = sub_response.data
 
-        # Fetch subscription details joined with the plan info
-        sub_response = None
-        try:
-            # Step 1: Fetch the core subscription record first.
-            sub_response = supabase.table('user_subscriptions') \
-                    .select('*') \
-                    .eq('user_id', uid) \
-                .maybe_single() \
-                .execute()
-        except APIError as e:
-            if e.code == '204':
-                current_app.logger.info(f"User {uid} has no subscription (APIError 204 caught). Will return default free plan.")
-                sub_response = SimpleNamespace(data=None)
-            else:
-                current_app.logger.error(f"An unexpected APIError occurred fetching subscription for user {uid}: {e}", exc_info=True)
-                return jsonify({"error": "A database error occurred while fetching your subscription."}), 500
+        # --- WRITE AND READ PHASE (only if necessary) ---
+        if not subscription:
+            current_app.logger.info(f"No subscription record for user {uid}. Provisioning default free plan.")
+            period_start = date.today().replace(day=1)
+            period_end = get_last_day_of_month(date.today())
+            display_name = g.user.user_metadata.get('full_name') or g.user.user_metadata.get('name', 'N/A')
 
-            # If no subscription, return a specific status indicating no plan.
-        if not sub_response or not sub_response.data:
-                current_app.logger.info(f"No subscription record for user {uid}. Provisioning default free plan.")
-                try:
-                    period_start = date.today().replace(day=1)
-                    period_end = get_last_day_of_month(date.today())
-                    display_name = g.user.user_metadata.get('full_name') or g.user.user_metadata.get('name', 'N/A')
+            # Upsert the subscription and usage records. This is an atomic "write" operation.
+            supabase.table('user_subscriptions').upsert({
+                'user_id': uid, 'plan_id': 1, 'status': 'active',
+                'current_period_start': str(period_start), 'current_period_end': str(period_end)
+            }, on_conflict='user_id').execute()
 
-                    # Use upsert to atomically create records, which prevents race conditions
-                    # from concurrent requests when a new user signs up.
-                    supabase.table('user_subscriptions').upsert({
-                        'user_id': uid, 'plan_id': 1, 'status': 'active',
-                        'current_period_start': str(period_start), 'current_period_end': str(period_end)
-                    }, on_conflict='user_id').execute()
+            supabase.table('feature_usage').upsert({
+                'user_id': uid, 'plan_id': 1, 'period_start': str(period_start),
+                'period_end': str(period_end), 'display_name': display_name
+            }, on_conflict='user_id,period_start,period_end').execute()
 
-                    supabase.table('feature_usage').upsert({
-                        'user_id': uid, 'plan_id': 1, 'period_start': str(period_start),
-                        'period_end': str(period_end), 'resume_count': 0,
-                        'cover_letter_count': 0, 'linkedin_optimize_count': 0, 'display_name': display_name
-                    }, on_conflict='user_id,period_start,period_end').execute()
+            # Now that we are certain the records exist, re-fetch the subscription data. This is our second "read".
+            subscription = supabase.table('user_subscriptions').select('*').eq('user_id', uid).single().execute().data
+            if not subscription:
+                current_app.logger.error(f"FATAL: Failed to fetch subscription for user {uid} immediately after upserting.")
+                return jsonify({"error": "Failed to initialize your user profile."}), 500
 
-                    # Now that we are certain the records exist, fetch the complete data to return.
-                    # This time, we do it in separate queries to avoid the need for a foreign key.
-                    sub_data_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).single().execute()
-                    plan_data_res = supabase.table('subscription_plans').select('*').eq('id', 1).single().execute()
-                    usage_data_res = supabase.table('feature_usage').select('*').eq('user_id', uid).eq('period_start', str(period_start)).single().execute()
+        # --- DATA ASSEMBLY PHASE ---
+        # Step 2: Fetch the plan details for the user's subscription.
+        plan_response = supabase.table('subscription_plans').select('*').eq('id', subscription['plan_id']).single().execute()
+        if not plan_response.data:
+            current_app.logger.error(f"Could not load plan details for plan_id: {subscription['plan_id']}.")
+            return jsonify({"error": "Subscription plan details could not be loaded."}), 500
+        
+        # Manually attach the plan data to the subscription object.
+        subscription['subscription_plans'] = plan_response.data
 
-                    if not all([sub_data_res.data, plan_data_res.data, usage_data_res.data]):
-                        current_app.logger.error(f"Failed to fetch records for user {uid} after upserting.")
-                        return jsonify({"error": "Failed to initialize your user profile."}), 500
-
-                    # Manually combine the results into the expected structure
-                    response_data = sub_data_res.data
-                    response_data['subscription_plans'] = plan_data_res.data
-                    response_data['usage'] = usage_data_res.data
-                    
-                    current_app.logger.info(f"Successfully provisioned free plan for user {uid}.")
-                    return jsonify(response_data), 200
-
-                except Exception as e:
-                    current_app.logger.error(f"Error provisioning free plan for user {uid}: {e}", exc_info=True)
-                    return jsonify({"error": "Could not initialize your subscription."}), 500
-
-            subscription = sub_response.data
-            # Step 2: Now fetch the plan details using the plan_id from the subscription.
-            plan_response = supabase.table('subscription_plans').select('*').eq('id', subscription['plan_id']).single().execute()
-            if not plan_response.data:
-                current_app.logger.error(f"Could not load plan details for plan_id: {subscription['plan_id']}.")
-                return jsonify({"error": "Subscription plan details could not be loaded."}), 500
-            
-            subscription['subscription_plans'] = plan_response.data
-
-        # If subscription already existed, period_start/end are strings. Standardize.
+        # Step 3: Fetch the usage for the current period.
         period_start_str = subscription['current_period_start']
         period_end_str = subscription['current_period_end']
 
-        # Fetch usage for the current period
-        usage_response = supabase.table('feature_usage') \
-            .select('*') \
-                .eq('user_id', uid) \
+        usage_response = supabase.table('feature_usage').select('*') \
+            .eq('user_id', uid) \
             .eq('period_start', period_start_str) \
             .eq('period_end', period_end_str) \
-            .maybe_single() \
-            .execute()
+            .maybe_single().execute()
             
+        # Attach usage data, defaulting to an empty object if none is found.
         subscription['usage'] = usage_response.data if usage_response.data else {}
 
         return jsonify(subscription), 200
@@ -151,7 +120,7 @@ def create_checkout_session():
 @require_authentication
 def cancel_subscription():
     """Cancels a user's active paid subscription via Stripe."""
-    stripe.api_key = current_app.config.get("STRIPE_SECRET_KEY")
+    stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
     if not stripe.api_key:
         current_app.logger.warning("Stripe is not configured. Missing secret key.")
         return jsonify({"error": "This feature is not configured on the server."}), 503

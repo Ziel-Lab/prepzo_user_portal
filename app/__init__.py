@@ -8,6 +8,7 @@ from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
 from .userPortal.careerTools.coverLetter import cover_letter_bp
 from .userPortal.careerTools.linkedinOptimizer import linkedin_optimizer_bp
 from .userPortal.subscription import subscription_bp
+from .auth import auth_bp
 from .extensions import init_supabase
 from .secrets import get_secret
 
@@ -70,4 +71,5 @@ def create_app():
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(subscription_bp)
+    app.register_blueprint(auth_bp)
     return app
