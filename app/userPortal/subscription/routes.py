@@ -42,6 +42,7 @@ def get_subscription_status():
                 try:
                     period_start = date.today().replace(day=1)
                     period_end = get_last_day_of_month(date.today())
+                    display_name = g.user.user_metadata.get('full_name') or g.user.user_metadata.get('name', 'N/A')
 
                     # Use upsert to atomically create records, which prevents race conditions
                     # from concurrent requests when a new user signs up.
@@ -53,7 +54,7 @@ def get_subscription_status():
                     supabase.table('feature_usage').upsert({
                         'user_id': uid, 'plan_id': 1, 'period_start': str(period_start),
                         'period_end': str(period_end), 'resume_count': 0,
-                        'cover_letter_count': 0, 'linkedin_optimize_count': 0
+                        'cover_letter_count': 0, 'linkedin_optimize_count': 0, 'display_name': display_name
                     }, on_conflict='user_id,period_start,period_end').execute()
 
                     # Now that we are certain the records exist, fetch the complete data to return.

@@ -106,7 +106,7 @@ def get_analyze_resume():
             .eq("user_id", current_user_id) \
             .execute()
 
-        return jsonify(query_response.data or []), 200 
+        return jsonify(query_response.data or []), 200
         
     except Exception as e:
         current_app.logger.error(f"Error fetching from analyze_resume table: {str(e)}")

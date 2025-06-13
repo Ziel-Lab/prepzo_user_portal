@@ -74,7 +74,7 @@ def create_linkedin_optimization():
 
         insert_data = {
             "uid": current_user_id,
-            "display name": user_display_name, 
+            "display_name": user_display_name, 
             "linkedin_url": linkedin_url,
             "comments": comments,
             "api_response": api_data 
