@@ -22,7 +22,7 @@ def get_subscription_status():
         # Fetch subscription details joined with the plan info
         sub_response = None
         try:
-                # Step 1: Fetch the core subscription record first.
+            # Step 1: Fetch the core subscription record first.
             sub_response = supabase.table('user_subscriptions') \
                     .select('*') \
                     .eq('user_id', uid) \
@@ -30,7 +30,7 @@ def get_subscription_status():
                 .execute()
         except APIError as e:
             if e.code == '204':
-                    current_app.logger.info(f"User {uid} has no subscription (APIError 204 caught). Will return default free plan.")
+                current_app.logger.info(f"User {uid} has no subscription (APIError 204 caught). Will return default free plan.")
                 sub_response = SimpleNamespace(data=None)
             else:
                 current_app.logger.error(f"An unexpected APIError occurred fetching subscription for user {uid}: {e}", exc_info=True)

@@ -1,6 +1,5 @@
 from supabase import create_client, ClientOptions
 import logging
-import os
 
 supabase = None
 
@@ -8,11 +7,11 @@ def init_supabase(app):
     global supabase
     logger = app.logger 
 
-    SUPABASE_URL = os.getenv("SUPABASE_URL")
-    SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    SUPABASE_URL = app.config.get("SUPABASE_URL")
+    SUPABASE_KEY = app.config.get("SUPABASE_SERVICE_ROLE_KEY")
 
     if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.error("Error: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing from configuration. Supabase client NOT initialized.")
+        logger.error("Error: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing from Flask configuration. Supabase client NOT initialized.")
         return
 
     try:
