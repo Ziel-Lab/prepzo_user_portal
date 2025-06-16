@@ -32,7 +32,8 @@ def create_app():
             "https://dashboard.prepzo.ai",
          ],
          supports_credentials=True,
-         allow_headers=["Content-Type", "Authorization"],
+         allow_headers="*",
+         expose_headers="*", 
          methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"])
 
     # Logging setup
