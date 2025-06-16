@@ -184,12 +184,18 @@ def stripe_webhook():
             paid_plan_id = 2 # Assuming 'Pro' plan is ID 2
             auth_user_res = supabase.auth.admin.get_user_by_id(uid)
             display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
-            
-            stripe_sub = stripe.Subscription.retrieve(subscription_id)
-            period_start = str(datetime.fromtimestamp(stripe_sub.current_period_start).date())
-            period_end = str(datetime.fromtimestamp(stripe_sub.current_period_end).date())
-            stripe_price_id = stripe_sub.items.data[0].price.id if stripe_sub.items.data else None
 
+            # Retrieve the invoice to get the accurate billing period and price.
+            # This is more reliable than retrieving the subscription immediately after creation.
+            invoice_id = session.get('invoice')
+            if not invoice_id:
+                raise ValueError(f"Webhook Error: Checkout session {session.get('id')} is missing the 'invoice' ID.")
+            
+            invoice = stripe.Invoice.retrieve(invoice_id)
+            period_start = str(datetime.fromtimestamp(invoice.period_start).date())
+            period_end = str(datetime.fromtimestamp(invoice.period_end).date())
+            stripe_price_id = invoice.lines.data[0].price.id if invoice.lines.data else None
+            
             # Atomically update the database using our new function
             current_app.logger.info(f"Calling RPC 'handle_new_paid_subscription' for user {uid}")
             supabase.rpc('handle_new_paid_subscription', {
