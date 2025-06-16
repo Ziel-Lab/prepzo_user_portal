@@ -8,7 +8,7 @@ from .helpers import check_and_use_feature, get_last_day_of_month, require_authe
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
 
-@subscription_bp.route("/status", methods=["GET"])
+@subscription_bp.route("/status", methods=["GET", "OPTIONS"])
 @require_authentication
 def get_subscription_status():
     """
@@ -199,12 +199,10 @@ def stripe_webhook():
             period_start = date.today()
             period_end = get_last_day_of_month(period_start)
 
-        # First, check if a subscription record already exists for this user.
-        existing_sub_res = supabase.table('user_subscriptions').select('user_id').eq('user_id', uid).maybe_single().execute()
-
+        # This dictionary holds all data for inserts OR updates.
         subscription_data = {
             'plan_id': paid_plan_id, 
-            'status': 'pro', 
+            'status': 'pro',
             'display_name': display_name,
             'stripe_subscription_id': subscription_id,
             'stripe_customer_id': customer_id,
@@ -216,10 +214,16 @@ def stripe_webhook():
             'user_id': uid 
         }
 
+        # Check if a subscription record already exists to decide whether to update or insert.
+        existing_sub_res = supabase.table('user_subscriptions').select('user_id').eq('user_id', uid).maybe_single().execute()
+
         if existing_sub_res.data:
             # Record exists, so we update it.
             current_app.logger.info(f"Existing subscription found for user {uid}. Updating record.")
-            sub_update_res = supabase.table('user_subscriptions').update(subscription_data).eq('user_id', uid).execute()
+            # It's safer to create a specific payload for the update to avoid changing immutable columns.
+            update_payload = subscription_data.copy()
+            del update_payload['user_id'] # user_id is used in the 'eq' filter, not for the update.
+            sub_update_res = supabase.table('user_subscriptions').update(update_payload).eq('user_id', uid).execute()
         else:
             # No record exists, so we insert a new one.
             current_app.logger.info(f"No existing subscription for user {uid}. Inserting new record.")
