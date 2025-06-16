@@ -154,7 +154,7 @@ def check_and_use_feature(feature_name, increment_by=1):
 
                     # Create the subscription record
                     new_sub_res = supabase.table('user_subscriptions').insert({
-                        'user_id': uid, 'plan_id': 1, 'status': 'free',
+                        'user_id': uid, 'plan_id': 1, 'status': 'free', 'display_name': display_name,
                         'current_period_start': str(period_start), 'current_period_end': str(period_end)
                     }).execute()
                     

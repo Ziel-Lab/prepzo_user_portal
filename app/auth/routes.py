@@ -32,15 +32,18 @@ def get_user_profile():
                 period_start = date.today().replace(day=1)
                 period_end = get_last_day_of_month(date.today())
 
+                # Correctly get the display name from the authenticated user object
+                display_name = g.user.user_metadata.get('full_name') or g.user.user_metadata.get('name', 'N/A')
+
                 # Use the same logic as the DB trigger to create records
                 supabase.table('user_subscriptions').insert({
                     'user_id': uid, 'plan_id': free_plan['id'], 'status': 'free',
-                    'display_name': free_plan['name'], 'started_at': date.today().isoformat(),
+                    'display_name': display_name, 'started_at': date.today().isoformat(),
                     'current_period_start': period_start.isoformat(), 'current_period_end': period_end.isoformat(),
                 }).execute()
 
                 supabase.table('feature_usage').insert({
-                    'user_id': uid, 'plan_id': free_plan['id'], 'display_name': free_plan['name'],
+                    'user_id': uid, 'plan_id': free_plan['id'], 'display_name': display_name,
                     'period_start': period_start.isoformat(), 'period_end': period_end.isoformat(),
                     'resume_count': 0, 'cover_letter_count': 0, 
                     'linkedin_optimize_count': 0, 'job_search_results_count': 0

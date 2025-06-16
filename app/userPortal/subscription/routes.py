@@ -147,6 +147,8 @@ def cancel_subscription():
 @subscription_bp.route("/stripe/webhook", methods=["POST", "OPTIONS"])
 def stripe_webhook():
     """Handles incoming webhooks from Stripe to update subscription status in the DB."""
+    current_app.logger.critical("--- STRIPE WEBHOOK ENDPOINT HIT! ---") # <-- TEMPORARY DIAGNOSTIC LOG
+
     stripe_webhook_secret = current_app.config.get("STRIPE_WEBHOOK_SECRET")
     stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
     if not stripe_webhook_secret or not stripe.api_key:
@@ -252,8 +254,9 @@ def stripe_webhook():
                 current_app.logger.info(f"Subscription deleted for user {uid}. Downgrading to free plan.")
                 supabase.table('user_subscriptions').update({
                     'plan_id': 1,
-                    'stripe_subscription_id': None,
                     'status': 'free',
+                    'stripe_subscription_id': None,
+                    'stripe_customer_id': None,
                     'stripe_price_id': None,
                     'current_period_start': str(period_start),
                     'current_period_end': str(period_end),
