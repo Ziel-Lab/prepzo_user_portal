@@ -109,38 +109,47 @@ def create_checkout_session():
 @subscription_bp.route("/stripe/cancel-subscription", methods=["POST", "OPTIONS"])
 @require_authentication
 def cancel_subscription():
-    """Cancels a user's active paid subscription via Stripe."""
     stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
     if not stripe.api_key:
-        current_app.logger.warning("Stripe is not configured. Missing secret key.")
         return jsonify({"error": "This feature is not configured on the server."}), 503
 
     supabase = extensions.supabase
     uid = g.user.id
 
     try:
-        sub_response = supabase.table('user_subscriptions').select('stripe_subscription_id, status').eq('user_id', uid).single().execute()
-        stripe_sub_id = sub_response.data.get('stripe_subscription_id')
-        status = sub_response.data.get('status')
+        sub_response = supabase\
+            .table('user_subscriptions')\
+            .select('stripe_subscription_id, status')\
+            .eq('user_id', uid)\
+            .single()\
+            .execute()
 
-        if status != 'active' or not stripe_sub_id:
+        stripe_sub_id = sub_response.data.get('stripe_subscription_id')
+        status        = sub_response.data.get('status')
+
+        # allow cancellation if status is active OR processing
+        if status not in ('active', 'processing') or not stripe_sub_id:
             return jsonify({"error": "No active subscription to cancel."}), 400
 
-        # Retrieve the subscription object, modify it, and then save it.
+        # tell Stripe to cancel at period end
         subscription = stripe.Subscription.retrieve(stripe_sub_id)
         subscription.cancel_at_period_end = True
         subscription.save()
-        
-        # Update our local database to reflect the pending cancellation.
+
+        # mark us “canceling” locally
         supabase.table('user_subscriptions').update({
             'status': 'canceling',
             'updated_at': datetime.utcnow().isoformat()
         }).eq('user_id', uid).execute()
 
-        return jsonify({"message": "Subscription cancellation scheduled successfully. Your plan will remain active until the end of your current billing period."}), 200
+        return jsonify({
+            "message": "Subscription cancellation scheduled successfully."
+        }), 200
+
     except Exception as e:
-        current_app.logger.error(f"Stripe subscription cancellation failed: {e}")
+        current_app.logger.error(f"Stripe cancellation failed: {e}")
         return jsonify({'error': str(e)}), 500
+
 
 @subscription_bp.route("/stripe/webhook", methods=["POST", "OPTIONS"])
 def stripe_webhook():
