@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta
-from flask import jsonify, g, request, current_app, make_response
+from flask import jsonify, g, request, current_app
 from app import extensions 
 from functools import wraps
 import calendar

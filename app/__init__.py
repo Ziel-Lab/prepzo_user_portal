@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
 import sys
@@ -41,6 +41,11 @@ def create_app():
 
     @app.before_request
     def log_request_info():
+        # Globally handle all pre-flight OPTIONS requests to ensure they return a 200 OK status.
+        # This runs before any route-specific decorators and solves the systemic CORS issue.
+        if request.method == 'OPTIONS':
+            return jsonify({'status': 'ok'}), 200
+
         app.logger.info(f"Incoming Request: {request.method} {request.path}")
         if request.data and request.content_type != 'multipart/form-data': 
             try:
