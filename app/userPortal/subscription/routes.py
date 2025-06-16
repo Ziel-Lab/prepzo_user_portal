@@ -185,17 +185,21 @@ def stripe_webhook():
             auth_user_res = supabase.auth.admin.get_user_by_id(uid)
             display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
 
-            # Retrieve the invoice to get the accurate billing period and price.
-            # This is more reliable than retrieving the subscription immediately after creation.
-            invoice_id = session.get('invoice')
-            if not invoice_id:
-                raise ValueError(f"Webhook Error: Checkout session {session.get('id')} is missing the 'invoice' ID.")
+            # To reliably get all data, retrieve the Checkout Session and expand the line_items.
+            # This is the most direct and reliable source for price and period information.
+            session_with_line_items = stripe.checkout.Session.retrieve(
+                session.get('id'),
+                expand=['line_items', 'subscription']
+            )
+
+            # Extract data from the expanded objects
+            subscription_obj = session_with_line_items.subscription
+            line_item = session_with_line_items.line_items.data[0]
+            stripe_price_id = line_item.price.id
             
-            invoice = stripe.Invoice.retrieve(invoice_id)
-            period_start = str(datetime.fromtimestamp(invoice.period_start).date())
-            period_end = str(datetime.fromtimestamp(invoice.period_end).date())
-            stripe_price_id = invoice.lines.data[0].price.id if invoice.lines.data else None
-            
+            period_start = str(datetime.fromtimestamp(subscription_obj.current_period_start).date())
+            period_end = str(datetime.fromtimestamp(subscription_obj.current_period_end).date())
+
             # Atomically update the database using our new function
             current_app.logger.info(f"Calling RPC 'handle_new_paid_subscription' for user {uid}")
             supabase.rpc('handle_new_paid_subscription', {
