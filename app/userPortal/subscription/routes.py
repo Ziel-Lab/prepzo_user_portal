@@ -8,56 +8,37 @@ from .helpers import check_and_use_feature, get_last_day_of_month, require_authe
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
 
-@subscription_bp.route("/status", methods=["GET", "OPTIONS"])
+@subscription_bp.route("/status", methods=["GET"])
 @require_authentication
 def get_subscription_status():
     """
     Endpoint for the frontend to get the user's full subscription and usage status.
-    If a user has no subscription, it provisions the default 'free' plan for them.
-    This function now uses a clear read-then-write pattern to avoid race conditions.
+    Relies on the `handle_new_user` database trigger to provision new users.
     """
     supabase = extensions.supabase
     uid = g.user.id
 
     try:
-        # --- READ PHASE ---
-        # Step 1: Attempt to fetch the user's subscription.
-        sub_response = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
-        subscription = sub_response.data
+        # Step 1: Fetch the user's subscription.
+        sub_response = supabase.table('user_subscriptions').select('*').eq('user_id', uid).execute()
 
-        # --- WRITE AND READ PHASE (only if necessary) ---
-        if not subscription:
-            current_app.logger.info(f"No subscription record for user {uid}. Provisioning default free plan.")
-            period_start = date.today().replace(day=1)
-            period_end = get_last_day_of_month(date.today())
-            display_name = g.user.user_metadata.get('full_name') or g.user.user_metadata.get('name', 'N/A')
-
-            # Upsert the subscription and usage records. This is an atomic "write" operation.
-            supabase.table('user_subscriptions').upsert({
-                'user_id': uid, 'plan_id': 1, 'status': 'active',
-                'current_period_start': str(period_start), 'current_period_end': str(period_end)
-            }, on_conflict='user_id').execute()
-
-            supabase.table('feature_usage').upsert({
-                'user_id': uid, 'plan_id': 1, 'period_start': str(period_start),
-                'period_end': str(period_end), 'display_name': display_name
-            }, on_conflict='user_id,period_start,period_end').execute()
-
-            # Now that we are certain the records exist, re-fetch the subscription data. This is our second "read".
-            subscription = supabase.table('user_subscriptions').select('*').eq('user_id', uid).single().execute().data
-            if not subscription:
-                current_app.logger.error(f"FATAL: Failed to fetch subscription for user {uid} immediately after upserting.")
-                return jsonify({"error": "Failed to initialize your user profile."}), 500
-
-        # --- DATA ASSEMBLY PHASE ---
-        # Step 2: Fetch the plan details for the user's subscription.
-        plan_response = supabase.table('subscription_plans').select('*').eq('id', subscription['plan_id']).single().execute()
-        if not plan_response.data:
-            current_app.logger.error(f"Could not load plan details for plan_id: {subscription['plan_id']}.")
-            return jsonify({"error": "Subscription plan details could not be loaded."}), 500
+        if not sub_response.data:
+            current_app.logger.error(f"FATAL: No subscription found for user {uid}, but the DB trigger should have created one.")
+            return jsonify({"error": "Your user profile is not configured correctly. Please contact support."}), 500
         
-        # Manually attach the plan data to the subscription object.
-        subscription['subscription_plans'] = plan_response.data
+        subscription = sub_response.data[0]
+
+        # Step 2: Fetch the plan details separately.
+        plan_id = subscription.get('plan_id')
+        if plan_id:
+            plan_response = supabase.table('subscription_plans').select('*').eq('id', plan_id).execute()
+            if plan_response.data:
+                subscription['subscription_plans'] = plan_response.data[0]
+            else:
+                current_app.logger.warning(f"Subscription plan with id {plan_id} not found for user {uid}.")
+                subscription['subscription_plans'] = None
+        else:
+            subscription['subscription_plans'] = None
 
         # Step 3: Fetch the usage for the current period.
         period_start_str = subscription['current_period_start']
@@ -67,15 +48,24 @@ def get_subscription_status():
             .eq('user_id', uid) \
             .eq('period_start', period_start_str) \
             .eq('period_end', period_end_str) \
-            .maybe_single().execute()
-            
-        # Attach usage data, defaulting to an empty object if none is found.
-        subscription['usage'] = usage_response.data if usage_response.data else {}
+            .execute()
+
+        if usage_response.data:
+            subscription['usage'] = usage_response.data[0]
+        else:
+            subscription['usage'] = {}
 
         return jsonify(subscription), 200
         
+    except APIError as e:
+        if 'Missing response' in str(e.message):
+            current_app.logger.error(f"DATABASE NETWORK ERROR in /subscription/status for user {uid}: {e}", exc_info=False)
+            return jsonify({"error": "Service temporarily unavailable due to a database connection issue. Please try again later."}), 503
+        else:
+            current_app.logger.error(f"DATABASE API_ERROR in /subscription/status for user {uid}: {e}", exc_info=True)
+            return jsonify({"error": "A database error occurred while fetching your subscription.", "details": str(e.message)}), 500
     except Exception as e:
-        current_app.logger.error(f"An unexpected exception occurred in /subscription/status: {e}", exc_info=True)
+        current_app.logger.error(f"An unexpected exception occurred in /subscription/status for user {uid}: {e}", exc_info=True)
         return jsonify({"error": "An unexpected server error occurred while fetching subscription status."}), 500
 
 @subscription_bp.route("/stripe/create-checkout-session", methods=["POST"])
@@ -203,8 +193,8 @@ def stripe_webhook():
             period_end = datetime.fromtimestamp(stripe_sub.current_period_end).date()
         except Exception as e:
             current_app.logger.error(f"Failed to retrieve subscription {subscription_id} from Stripe: {e}. Falling back to manual date calculation.")
-        period_start = date.today()
-        period_end = get_last_day_of_month(period_start)
+            period_start = date.today()
+            period_end = get_last_day_of_month(period_start)
 
         # First, check if a subscription record already exists for this user.
         existing_sub_res = supabase.table('user_subscriptions').select('user_id').eq('user_id', uid).maybe_single().execute()

@@ -22,7 +22,7 @@ def create_app():
         for key, value in secrets.items():
             app.config[key] = value
     
-    # Centralized CORS Configuration
+     # Centralized CORS Configuration
     CORS(app,
          origins=["https://prepzo-client-git-dev-prepzo.vercel.app"],
          supports_credentials=True,

@@ -12,20 +12,11 @@ class QuotaExceededError(Exception):
 def require_authentication(f):
     """
     More robust decorator to protect routes and set g.user.
-    - Handles CORS preflight OPTIONS requests manually.
     - Fails early if Authorization header is missing or malformed.
     - Uses the low-level Supabase API to avoid 204 response quirks.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if request.method == 'OPTIONS':
-            response = make_response()
-            response.headers.add("Access-Control-Allow-Origin", "https://prepzo-client-git-dev-prepzo.vercel.app")
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,access-control-allow-origin')
-            response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE')
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response
-
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             current_app.logger.warning(f"Bad or missing Authorization header received: {auth_header!r}")
