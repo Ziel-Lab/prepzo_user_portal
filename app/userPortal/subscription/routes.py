@@ -174,148 +174,92 @@ def stripe_webhook():
         uid = session.get('client_reference_id')
 
         if not uid:
-            current_app.logger.error(f"Stripe 'checkout.session.completed' webhook received without a client_reference_id. Cannot process for session_id: {session.get('id')}")
-            return jsonify(success=True)
+            current_app.logger.error(f"Stripe 'checkout.session.completed' webhook received without a client_reference_id. Cannot process session: {session.get('id')}")
+            return jsonify(success=True) # Acknowledge the webhook
         
         try:
+            # Fetch all necessary data before calling the database function
+            paid_plan_id = 2 # Assuming 'Pro' plan is ID 2
             auth_user_res = supabase.auth.admin.get_user_by_id(uid)
             display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
-        except Exception as e:
-            current_app.logger.error(f"Could not fetch user {uid} from Supabase Auth to get display_name: {e}")
-            display_name = "N/A"
-
-        paid_plan_id = 2 
-        stripe_price_id = None
-        current_app.logger.info(f"Stripe checkout completed for uid {uid} (customer {customer_id}). Attempting to upgrade to paid plan_id: {paid_plan_id}.")
-
-        try:
+            
             stripe_sub = stripe.Subscription.retrieve(subscription_id)
-            period_start = datetime.fromtimestamp(stripe_sub.current_period_start).date()
-            period_end = datetime.fromtimestamp(stripe_sub.current_period_end).date()
-            if stripe_sub.items.data:
-                stripe_price_id = stripe_sub.items.data[0].price.id
+            period_start = str(datetime.fromtimestamp(stripe_sub.current_period_start).date())
+            period_end = str(datetime.fromtimestamp(stripe_sub.current_period_end).date())
+            stripe_price_id = stripe_sub.items.data[0].price.id if stripe_sub.items.data else None
+
+            # Atomically update the database using our new function
+            current_app.logger.info(f"Calling RPC 'handle_new_paid_subscription' for user {uid}")
+            supabase.rpc('handle_new_paid_subscription', {
+                'p_user_id': uid,
+                'p_plan_id': paid_plan_id,
+                'p_display_name': display_name,
+                'p_stripe_subscription_id': subscription_id,
+                'p_stripe_customer_id': customer_id,
+                'p_stripe_price_id': stripe_price_id,
+                'p_period_start': period_start,
+                'p_period_end': period_end
+            }).execute()
+            current_app.logger.info(f"Successfully processed 'checkout.session.completed' for user {uid}")
+
         except Exception as e:
-            current_app.logger.error(f"Failed to retrieve subscription {subscription_id} from Stripe: {e}. Falling back to manual date calculation.")
-            period_start = date.today()
-            period_end = get_last_day_of_month(period_start)
-
-        # This dictionary holds all data for inserts OR updates.
-        subscription_data = {
-            'plan_id': paid_plan_id, 
-            'status': 'pro',
-            'display_name': display_name,
-            'stripe_subscription_id': subscription_id,
-            'stripe_customer_id': customer_id,
-            'stripe_price_id': stripe_price_id,
-            'current_period_start': str(period_start), 
-            'current_period_end': str(period_end),
-            'next_billing_date': str(period_end),
-            'updated_at': datetime.utcnow().isoformat(),
-            'user_id': uid 
-        }
-
-        # Check if a subscription record already exists to decide whether to update or insert.
-        existing_sub_res = supabase.table('user_subscriptions').select('user_id').eq('user_id', uid).maybe_single().execute()
-
-        if existing_sub_res.data:
-            # Record exists, so we update it.
-            current_app.logger.info(f"Existing subscription found for user {uid}. Updating record.")
-            # It's safer to create a specific payload for the update to avoid changing immutable columns.
-            update_payload = subscription_data.copy()
-            del update_payload['user_id'] # user_id is used in the 'eq' filter, not for the update.
-            sub_update_res = supabase.table('user_subscriptions').update(update_payload).eq('user_id', uid).execute()
-        else:
-            # No record exists, so we insert a new one.
-            current_app.logger.info(f"No existing subscription for user {uid}. Inserting new record.")
-            sub_update_res = supabase.table('user_subscriptions').insert(subscription_data).execute()
-        
-        if not sub_update_res.data:
-            current_app.logger.error(f"Failed to update/insert subscription for user_id: {uid}. Response: {sub_update_res}")
-            # Still return 200 to Stripe, but log the error.
-            return jsonify(success=True)
-
-        current_app.logger.info(f"Successfully wrote subscription for user_id: {uid}.")
-        
-        usage_res = supabase.table('feature_usage').upsert({
-            'user_id': uid, 
-            'period_start': str(period_start), 
-            'period_end': str(period_end), 
-            'plan_id': paid_plan_id,
-            'display_name': display_name
-        }, on_conflict='user_id,period_start,period_end').execute()
-
-        if not usage_res.data:
-            current_app.logger.error(f"Failed to create feature usage record for user {uid} on new paid plan. Response: {usage_res}")
+            # Log any error, but still return a 200 to Stripe to prevent retries for logic errors.
+            current_app.logger.error(f"Error processing 'checkout.session.completed' for user {uid}: {e}", exc_info=True)
 
     elif event_type == 'invoice.payment_succeeded':
         invoice = data
         customer_id = invoice.get('customer')
         subscription_id = invoice.get('subscription') 
-        billing_end_ts = invoice.get('period_end')
+        
+        if customer_id and subscription_id:
+            try:
+                # Extract new period dates from the invoice
+                next_period_start = str(datetime.fromtimestamp(invoice.get('period_start')).date())
+                next_period_end = str(datetime.fromtimestamp(invoice.get('period_end')).date())
 
-        if customer_id:
-            sub_res = supabase.table('user_subscriptions').select('id, user_id, current_period_end').eq('stripe_customer_id', customer_id).single().execute()
-            
-            if sub_res.data:
-                sub_id = sub_res.data['id']
-                uid = sub_res.data['user_id']
-                
-                try:
-                    auth_user_res = supabase.auth.admin.get_user_by_id(uid)
-                    display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
-                except Exception as e:
-                    current_app.logger.error(f"Could not fetch user {uid} from Supabase Auth to get display_name: {e}")
-                    display_name = "N/A"
-
-                next_period_start = datetime.fromtimestamp(invoice.get('period_start')).date()
-                next_period_end = datetime.fromtimestamp(billing_end_ts).date()
-
-                current_app.logger.info(f"--- STRIPE WEBHOOK: Updating subscription period for user {uid} to {next_period_start} - {next_period_end} ---")
-                supabase.table('user_subscriptions').update({
-                    'current_period_start': str(next_period_start),
-                    'current_period_end': str(next_period_end),
-                    'next_billing_date': str(next_period_end),
-                    'updated_at': datetime.utcnow().isoformat(),
-                    'stripe_subscription_id': subscription_id, 
-                    'status': 'pro' 
-                }).eq('id', sub_id).execute()
-                
-                current_app.logger.info(f"--- STRIPE WEBHOOK: Creating new usage record for user {uid} for period {next_period_start} - {next_period_end} ---")
-                supabase.table('feature_usage').insert({
-                    'user_id': uid,
-                    'plan_id': 2, 
-                    'period_start': str(next_period_start),
-                    'period_end': str(next_period_end),
-                    'display_name': display_name
+                # Atomically update the database using our renewal function
+                current_app.logger.info(f"Calling RPC 'handle_subscription_renewal' for customer {customer_id}")
+                supabase.rpc('handle_subscription_renewal', {
+                    'p_stripe_customer_id': customer_id,
+                    'p_stripe_subscription_id': subscription_id,
+                    'p_next_period_start': next_period_start,
+                    'p_next_period_end': next_period_end
                 }).execute()
+                current_app.logger.info(f"Successfully processed 'invoice.payment_succeeded' for customer {customer_id}")
+
+            except Exception as e:
+                current_app.logger.error(f"Error processing 'invoice.payment_succeeded' for customer {customer_id}: {e}", exc_info=True)
 
     elif event_type == 'invoice.payment_failed':
         subscription_id = data.get('subscription')
-        supabase.table('user_subscriptions').update({'status': 'past_due'}).eq('stripe_subscription_id', subscription_id).execute()
+        if subscription_id:
+            supabase.table('user_subscriptions').update({'status': 'past_due'}).eq('stripe_subscription_id', subscription_id).execute()
 
     elif event_type == 'customer.subscription.deleted':
         subscription = data
-        customer_id = subscription['customer']
+        customer_id = subscription.get('customer')
         
-        sub_res = supabase.table('user_subscriptions').select('id', 'user_id').eq('stripe_customer_id', customer_id).maybe_single().execute()
+        if customer_id:
+            sub_res = supabase.table('user_subscriptions').select('id, user_id').eq('stripe_customer_id', customer_id).maybe_single().execute()
 
-        if sub_res.data:
-            sub_id = sub_res.data['id']
-            uid = sub_res.data['user_id']
-            period_start = date.today().replace(day=1)
-            period_end = get_last_day_of_month(date.today())
-            
-            # Downgrade user to the free plan (id=1) and set status to 'free'
-            current_app.logger.info(f"Subscription deleted for user {uid}. Downgrading to free plan.")
-            supabase.table('user_subscriptions').update({
-                'plan_id': 1,
-                'stripe_subscription_id': None,
-                'status': 'free',
-                'current_period_start': str(period_start),
-                'current_period_end': str(period_end),
-                'next_billing_date': None,
-                'updated_at': datetime.utcnow().isoformat()
-            }).eq('id', sub_id).execute()
+            if sub_res.data:
+                sub_id = sub_res.data['id']
+                uid = sub_res.data['user_id']
+                period_start = date.today().replace(day=1)
+                period_end = get_last_day_of_month(date.today())
+                
+                # Downgrade user to the free plan (id=1) and set status to 'free'
+                current_app.logger.info(f"Subscription deleted for user {uid}. Downgrading to free plan.")
+                supabase.table('user_subscriptions').update({
+                    'plan_id': 1,
+                    'stripe_subscription_id': None,
+                    'status': 'free',
+                    'stripe_price_id': None,
+                    'current_period_start': str(period_start),
+                    'current_period_end': str(period_end),
+                    'next_billing_date': None,
+                    'updated_at': datetime.utcnow().isoformat()
+                }).eq('id', sub_id).execute()
 
     return jsonify(success=True)
 
