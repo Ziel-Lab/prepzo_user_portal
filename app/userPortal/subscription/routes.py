@@ -171,76 +171,56 @@ def stripe_webhook():
 
     if event_type == 'checkout.session.completed':
         session = data
+        uid = session.get('client_reference_id')
         customer_id = session.get('customer')
         subscription_id = session.get('subscription')
-        uid = session.get('client_reference_id')
 
-        if not uid:
-            current_app.logger.error(f"Stripe 'checkout.session.completed' webhook received without a client_reference_id. Cannot process session: {session.get('id')}")
-            return jsonify(success=True) # Acknowledge the webhook
-        
+        if not all([uid, customer_id, subscription_id]):
+            current_app.logger.error(f"Webhook Error: 'checkout.session.completed' is missing required IDs. Session: {session.get('id')}")
+            return jsonify(success=True)
+
         try:
-            # Fetch all necessary data before calling the database function
-            paid_plan_id = 2 # Assuming 'Pro' plan is ID 2
-            auth_user_res = supabase.auth.admin.get_user_by_id(uid)
-            display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
-
-            # To reliably get all data, retrieve the Checkout Session and expand the line_items.
-            # This is the most direct and reliable source for price and period information.
-            session_with_line_items = stripe.checkout.Session.retrieve(
-                session.get('id'),
-                expand=['line_items', 'subscription']
-            )
-
-            # Extract data from the expanded objects
-            subscription_obj = session_with_line_items.subscription
-            line_item = session_with_line_items.line_items.data[0]
-            stripe_price_id = line_item.price.id
-            
-            period_start = str(datetime.fromtimestamp(subscription_obj.current_period_start).date())
-            period_end = str(datetime.fromtimestamp(subscription_obj.current_period_end).date())
-
-            # Atomically update the database using our new function
-            current_app.logger.info(f"Calling RPC 'handle_new_paid_subscription' for user {uid}")
-            supabase.rpc('handle_new_paid_subscription', {
+            paid_plan_id = 2 # The ID for your "Pro" plan
+            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} from checkout session {session.get('id')}.")
+            supabase.rpc('provision_stripe_subscription', {
                 'p_user_id': uid,
-                'p_plan_id': paid_plan_id,
-                'p_display_name': display_name,
-                'p_stripe_subscription_id': subscription_id,
                 'p_stripe_customer_id': customer_id,
-                'p_stripe_price_id': stripe_price_id,
-                'p_period_start': period_start,
-                'p_period_end': period_end
+                'p_stripe_subscription_id': subscription_id,
+                'p_plan_id': paid_plan_id
             }).execute()
-            current_app.logger.info(f"Successfully processed 'checkout.session.completed' for user {uid}")
+            current_app.logger.info(f"Successfully provisioned Stripe info for user {uid}")
 
         except Exception as e:
-            # Log any error, but still return a 200 to Stripe to prevent retries for logic errors.
-            current_app.logger.error(f"Error processing 'checkout.session.completed' for user {uid}: {e}", exc_info=True)
+            error_message = f"Webhook processing failed for '{event_type}'. User: {uid}. Error: {e}"
+            current_app.logger.error(error_message, exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
 
     elif event_type == 'invoice.payment_succeeded':
         invoice = data
         customer_id = invoice.get('customer')
-        subscription_id = invoice.get('subscription') 
+        subscription_id = invoice.get('subscription')
         
-        if customer_id and subscription_id:
-            try:
-                # Extract new period dates from the invoice
-                next_period_start = str(datetime.fromtimestamp(invoice.get('period_start')).date())
-                next_period_end = str(datetime.fromtimestamp(invoice.get('period_end')).date())
+        if not all([customer_id, subscription_id]):
+            current_app.logger.error(f"Webhook Error: 'invoice.payment_succeeded' is missing required IDs. Invoice: {invoice.get('id')}")
+            return jsonify(success=True)
 
-                # Atomically update the database using our renewal function
-                current_app.logger.info(f"Calling RPC 'handle_subscription_renewal' for customer {customer_id}")
-                supabase.rpc('handle_subscription_renewal', {
-                    'p_stripe_customer_id': customer_id,
-                    'p_stripe_subscription_id': subscription_id,
-                    'p_next_period_start': next_period_start,
-                    'p_next_period_end': next_period_end
-                }).execute()
-                current_app.logger.info(f"Successfully processed 'invoice.payment_succeeded' for customer {customer_id}")
+        try:
+            next_period_start = str(datetime.fromtimestamp(invoice.get('period_start')).date())
+            next_period_end = str(datetime.fromtimestamp(invoice.get('period_end')).date())
 
-            except Exception as e:
-                current_app.logger.error(f"Error processing 'invoice.payment_succeeded' for customer {customer_id}: {e}", exc_info=True)
+            current_app.logger.info(f"Activating subscription for customer {customer_id} from invoice {invoice.get('id')}.")
+            supabase.rpc('activate_subscription_from_invoice', {
+                'p_stripe_customer_id': customer_id,
+                'p_stripe_subscription_id': subscription_id,
+                'p_next_period_start': next_period_start,
+                'p_next_period_end': next_period_end
+            }).execute()
+            current_app.logger.info(f"Successfully activated subscription for customer {customer_id}")
+
+        except Exception as e:
+            error_message = f"Webhook processing failed for '{event_type}'. Customer: {customer_id}. Error: {e}"
+            current_app.logger.error(error_message, exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
 
     elif event_type == 'invoice.payment_failed':
         subscription_id = data.get('subscription')
