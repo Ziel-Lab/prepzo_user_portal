@@ -123,17 +123,15 @@ def cancel_subscription():
         stripe_sub_id = sub_response.data.get('stripe_subscription_id')
         status = sub_response.data.get('status')
 
-        if status != 'pro' or not stripe_sub_id:
-            return jsonify({"error": "No active Pro subscription to cancel."}), 400
+        if status != 'active' or not stripe_sub_id:
+            return jsonify({"error": "No active subscription to cancel."}), 400
 
         # Retrieve the subscription object, modify it, and then save it.
-        # This pattern is more compatible with older versions of the Stripe library.
         subscription = stripe.Subscription.retrieve(stripe_sub_id)
         subscription.cancel_at_period_end = True
         subscription.save()
         
         # Update our local database to reflect the pending cancellation.
-        # This provides immediate feedback to the frontend.
         supabase.table('user_subscriptions').update({
             'status': 'canceling',
             'updated_at': datetime.utcnow().isoformat()
@@ -181,12 +179,18 @@ def stripe_webhook():
 
         try:
             paid_plan_id = 2 # The ID for your "Pro" plan
-            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} from checkout session {session.get('id')}.")
+
+            # Fetch the user's auth record to get their correct, up-to-date name.
+            auth_user_res = supabase.auth.admin.get_user_by_id(uid)
+            display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
+
+            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} ({display_name}) from checkout session {session.get('id')}.")
             supabase.rpc('provision_stripe_subscription', {
                 'p_user_id': uid,
                 'p_stripe_customer_id': customer_id,
                 'p_stripe_subscription_id': subscription_id,
-                'p_plan_id': paid_plan_id
+                'p_plan_id': paid_plan_id,
+                'p_display_name': display_name # Pass the correct name to the DB function
             }).execute()
             current_app.logger.info(f"Successfully provisioned Stripe info for user {uid}")
 
