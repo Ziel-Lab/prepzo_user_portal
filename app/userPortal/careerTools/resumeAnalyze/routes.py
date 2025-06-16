@@ -4,8 +4,54 @@ from app import extensions
 import magic
 import json
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
+import threading
 
 from . import resume_analyze_bp 
+
+def process_resume_analysis(app, user_id, user_name, payload):
+    with app.app_context():
+        xano_api_url_resume_analyze = app.config.get("XANO_API_URL_RESUME_ANALYZE")
+        current_resume_url = payload.get("current_resume")
+
+        try:
+            app.logger.info(f"Background thread started for user {user_id} to analyze resume: {current_resume_url}")
+            xano_response = requests.post(xano_api_url_resume_analyze, json=payload, timeout=300) # 5-minute timeout
+            xano_response.raise_for_status()
+            xano_data = xano_response.json()
+            app.logger.info(f"Successfully received data from Xano for user {user_id}.")
+
+            resume_id_from_db = None
+            try:
+                doc_query = extensions.supabase.table("user_documents") \
+                    .select("id") \
+                    .eq("document_url", current_resume_url) \
+                    .eq("uid", user_id) \
+                    .single() \
+                    .execute()
+                if doc_query.data and doc_query.data.get("id"):
+                    resume_id_from_db = doc_query.data.get("id")
+            except Exception as e:
+                app.logger.error(f"Error querying for resume_id for user {user_id} in background thread: {e}")
+
+            db_payload = {
+                "user_id": user_id,
+                "user_name": user_name,
+                "current_resume": current_resume_url,
+                "company_website": payload.get("company_website"),
+                "job_description": payload.get("job_description"),
+                "additional_comment": payload.get("additional_comments"),
+                "feedback_analysis": xano_data,
+                "resume_id": resume_id_from_db
+            }
+
+            extensions.supabase.table("analyze_resume").insert(db_payload).execute()
+            app.logger.info(f"Successfully inserted resume analysis into DB for user {user_id}.")
+
+        except requests.exceptions.RequestException as req_err:
+            app.logger.error(f"BACKGROUND ERROR (RequestException) for user {user_id}: {req_err}", exc_info=True)
+        except Exception as e:
+            app.logger.error(f"BACKGROUND ERROR (Exception) for user {user_id}: {e}", exc_info=True)
+
 
 @resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
 @require_authentication
@@ -15,8 +61,6 @@ def analyze_resume():
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-
-    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
     
     try:
         data = request.form
@@ -34,63 +78,15 @@ def analyze_resume():
             "company_website": company_website,
             "additional_comments": additional_comment_text
         }
+        
+        # Start the background task
+        thread = threading.Thread(target=process_resume_analysis, args=(current_app._get_current_object(), current_user_id, user_name, xano_payload))
+        thread.daemon = True
+        thread.start()
 
-        # --- Start of Debugging Block ---
-        print("\n--- DEBUGGING: Preparing to send request to Xano ---")
-        print(f"Target Xano URL: {xano_api_url_resume_analyze}")
-        print("Request Payload:")
-        print(json.dumps(xano_payload, indent=2))
-        print("--- End of Debugging Block ---\n")
-        # --- End of Debugging Block ---
+        # Immediately respond to the client
+        return jsonify({"message": "Your resume analysis has been started. The results will be available in your dashboard shortly."}), 202
 
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json() 
-
-        resume_id_from_db = None
-        try:
-            doc_query = extensions.supabase.table("user_documents") \
-                .select("id") \
-                .eq("document_url", current_resume_url) \
-                .eq("uid", current_user_id) \
-                .single() \
-                .execute()
-            if doc_query.data and doc_query.data.get("id"):
-                resume_id_from_db = doc_query.data.get("id")
-            else:
-                current_app.logger.warning(f"Warning: Could not find resume_id for URL: {current_resume_url} and user: {current_user_id}")
-        except Exception as e:
-            current_app.logger.error(f"Error querying for resume_id: {str(e)}")
-           
-        db_payload = {
-            "user_id": current_user_id,
-            "user_name": user_name,
-            "current_resume": current_resume_url, 
-            "company_website": company_website, 
-            "job_description": job_description, 
-            "additional_comment": additional_comment_text, 
-            "feedback_analysis": xano_data, 
-            "resume_id": resume_id_from_db 
-        }
-
-
-        try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-            if not insert_response.data:
-                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
-        except Exception as e:
-            current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
-
-        return jsonify(xano_data), xano_response.status_code
-
-    except requests.exceptions.HTTPError as http_err:
-        try:
-            error_detail = http_err.response.json()
-        except ValueError:
-            error_detail = str(http_err)
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
-    except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
         current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
