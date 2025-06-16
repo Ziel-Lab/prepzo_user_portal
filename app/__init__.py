@@ -11,6 +11,7 @@ from .userPortal.subscription import subscription_bp
 from .auth import auth_bp
 from .extensions import init_supabase
 from .secrets import get_secret
+import re
 
 def create_app():
     app = Flask(__name__)
@@ -22,19 +23,9 @@ def create_app():
         for key, value in secrets.items():
             app.config[key] = value
     
-     # Centralized CORS Configuration
+     # Centralized CORS Configuration - Now handled by custom middleware
     CORS(app,
-         origins=[
-            r"https://prepzo-client-.*\.vercel\.app",
-            r"http://localhost:.*",
-            "https://prepzo.ai",
-            "https://www.prepzo.ai",
-            "https://dashboard.prepzo.ai",
-         ],
-         supports_credentials=True,
-         allow_headers="*",
-         expose_headers="*", 
-         methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"])
+         supports_credentials=True)
 
     # Logging setup
     app.logger.handlers.clear()
@@ -45,6 +36,34 @@ def create_app():
     app.logger.addHandler(stream_handler)
 
     init_supabase(app)  # Initializes Supabase client with app config
+
+    @app.after_request
+    def after_request_func(response):
+        # Allow requests from all Vercel preview deployments, localhost, and custom domains
+        allowed_origins_regex = [
+            r"https://prepzo-client-.*\.vercel\.app",
+            r"http://localhost:.*",
+            "https://prepzo.ai",
+            "https://www.prepzo.ai",
+            "https://dashboard.prepzo.ai",
+        ]
+        
+        origin = request.headers.get('Origin')
+        if origin:
+            for pattern in allowed_origins_regex:
+                if re.fullmatch(pattern, origin):
+                    response.headers['Access-Control-Allow-Origin'] = origin
+                    break
+        
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, Access-Control-Allow-Origin'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, PATCH, DELETE'
+        
+        # Handle preflight (OPTIONS) requests
+        if request.method == 'OPTIONS':
+            response.status_code = 200 # OK
+        
+        return response
 
     @app.before_request
     def log_request_info():
@@ -65,6 +84,7 @@ def create_app():
     @app.after_request
     def log_response_info(response):
         app.logger.info(f"Outgoing Response: {request.method} {request.path} - Status {response.status_code}")
+        # The custom @app.after_request handles CORS headers now, so we can remove the log here.
         return response
 
     app.register_blueprint(main_bp)
