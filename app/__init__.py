@@ -24,7 +24,13 @@ def create_app():
     
      # Centralized CORS Configuration
     CORS(app,
-         origins=["https://prepzo-client-git-dev-prepzo.vercel.app"],
+         origins=[
+            r"https://prepzo-client-.*\.vercel\.app",
+            r"http://localhost:.*",
+            "https://prepzo.ai",
+            "https://www.prepzo.ai",
+            "https://dashboard.prepzo.ai",
+         ],
          supports_credentials=True,
          allow_headers=["Content-Type", "Authorization"],
          methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"])
