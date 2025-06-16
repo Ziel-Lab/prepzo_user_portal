@@ -1,244 +1,79 @@
-from flask import request, jsonify, current_app, g
-import requests 
-from app import extensions 
-import magic
-import json
-from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
+import uuid
 import threading
+import time
+import json
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 
-from . import resume_analyze_bp 
+resume_analyze_bp = Blueprint('resume_analyze_bp', __name__)
 
-def process_resume_analysis(app, user_id, user_name, payload):
-    with app.app_context():
-        xano_api_url_resume_analyze = app.config.get("XANO_API_URL_RESUME_ANALYZE")
-        current_resume_url = payload.get("current_resume")
+# This in-memory dictionary will store the state of our tasks.
+analysis_jobs = {}
 
-        try:
-            app.logger.info(f"Background thread started for user {user_id} to analyze resume: {current_resume_url}")
-            xano_response = requests.post(xano_api_url_resume_analyze, json=payload, timeout=300) # 5-minute timeout
-            xano_response.raise_for_status()
-            xano_data = xano_response.json()
-            app.logger.info(f"Successfully received data from Xano for user {user_id}.")
-
-            resume_id_from_db = None
-            try:
-                doc_query = extensions.supabase.table("user_documents") \
-                    .select("id") \
-                    .eq("document_url", current_resume_url) \
-                    .eq("uid", user_id) \
-                    .single() \
-                    .execute()
-                if doc_query.data and doc_query.data.get("id"):
-                    resume_id_from_db = doc_query.data.get("id")
-            except Exception as e:
-                app.logger.error(f"Error querying for resume_id for user {user_id} in background thread: {e}")
-
-            db_payload = {
-                "user_id": user_id,
-                "user_name": user_name,
-                "current_resume": current_resume_url,
-                "company_website": payload.get("company_website"),
-                "job_description": payload.get("job_description"),
-                "additional_comment": payload.get("additional_comments"),
-                "feedback_analysis": xano_data,
-                "resume_id": resume_id_from_db
-            }
-
-            extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-            app.logger.info(f"Successfully inserted resume analysis into DB for user {user_id}.")
-
-        except requests.exceptions.RequestException as req_err:
-            app.logger.error(f"BACKGROUND ERROR (RequestException) for user {user_id}: {req_err}", exc_info=True)
-        except Exception as e:
-            app.logger.error(f"BACKGROUND ERROR (Exception) for user {user_id}: {e}", exc_info=True)
-
-
-@resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
-@require_authentication
-@check_and_use_feature('resume')
-def analyze_resume():
-    current_user_id = str(g.user.id)
-    user_name = g.user.user_metadata.get('name') or \
-                g.user.user_metadata.get('display_name') or \
-                g.user.email or current_user_id
-    
+def perform_resume_analysis(task_id, user_id, resume_url, job_description, company_website, additional_comments, resume_title):
+    """
+    This function simulates a long-running resume analysis.
+    Replace the 'time.sleep' and mock data with your actual analysis logic.
+    """
     try:
-        data = request.form
-        current_resume_url = data.get("current_resume") 
-        job_description = data.get("job_description")
-        company_website = data.get("company_website")
-        additional_comment_text = data.get("additional_comments") 
+        # Simulate a long-running task like an API call
+        time.sleep(15) 
 
-        if not all([current_resume_url, job_description]):
-            return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
-
-        xano_payload = {
-            "current_resume": current_resume_url,
-            "job_description": job_description,
-            "company_website": company_website,
-            "additional_comments": additional_comment_text
+        # --- YOUR ACTUAL ANALYSIS LOGIC GOES HERE ---
+        mock_feedback = { "score": 85, "feedback": "This is a great resume." }
+        mock_new_resume = { "changes": "- Updated summary.", "new_resume": "Full text of new resume.", "new_score": 95 }
+        analysis_result = {
+            "feedback": json.dumps(mock_feedback),
+            "new_resume": json.dumps(mock_new_resume),
+            "analysis_id": "mock_analysis_" + str(uuid.uuid4()),
+            "message": "Analysis complete"
         }
-        
-        # Start the background task
-        thread = threading.Thread(target=process_resume_analysis, args=(current_app._get_current_object(), current_user_id, user_name, xano_payload))
-        thread.daemon = True
-        thread.start()
+        # --- END OF YOUR LOGIC ---
 
-        # Immediately respond to the client
-        return jsonify({"message": "Your resume analysis has been started. The results will be available in your dashboard shortly."}), 202
+        analysis_jobs[task_id] = {'status': 'SUCCESS', 'result': analysis_result}
 
     except Exception as e:
-        current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
-        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
+        analysis_jobs[task_id] = {'status': 'FAILURE', 'result': {'error': str(e)}}
 
-@resume_analyze_bp.route("/get-analyze-resume", methods=["GET", "OPTIONS"])
-@require_authentication
-def get_analyze_resume():
-    current_user_id = str(g.user.id)
 
-    try:
-        query_response = extensions.supabase.table("analyze_resume") \
-            .select("*") \
-            .eq("user_id", current_user_id) \
-            .execute()
-
-        return jsonify(query_response.data or []), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Error fetching from analyze_resume table: {str(e)}")
-        return jsonify({"error": f"Could not retrieve analyzed resume data: {str(e)}"}), 500
-        
-
-@resume_analyze_bp.route("/roast-resume", methods=["POST", "OPTIONS"])
-@require_authentication
-@check_and_use_feature('resume')
-def roast_resume():
-    current_user_id = str(g.user.id)
-    user_name = g.user.user_metadata.get('name') or \
-                g.user.user_metadata.get('display_name') or \
-                g.user.email or current_user_id
-
-    xano_api_url_resume_roast = current_app.config.get("XANO_API_URL_RESUME_ROAST")
-    SUPABASE_BUCKET = "user-documents"
-
-    resume_url_for_xano = None
-    resume_id_from_db = None
+@resume_analyze_bp.route("/start-analysis", methods=["POST"])
+@jwt_required()
+def start_analysis():
+    user_id = get_jwt_identity()
+    data = request.get_json()
     
-    try:
-        current_resume_url_form = request.form.get("current_resume_url")
-        file_to_upload = request.files.get("file")
+    resume_url = data.get('current_resume_url')
+    job_description = data.get('job_description')
+    company_website = data.get('company_website')
+    
+    if not all([resume_url, job_description, company_website]):
+        return jsonify({"error": "Missing required fields"}), 400
 
-        if file_to_upload:
-            if file_to_upload.filename == "":
-                return jsonify({"error": "No selected file for upload"}), 400
+    task_id = str(uuid.uuid4())
+    analysis_jobs[task_id] = {'status': 'PENDING', 'result': None}
 
-            file_bytes = file_to_upload.read()
-            file_to_upload.seek(0)
-
-            flask_mimetype = file_to_upload.mimetype
-            final_content_type_for_storage = flask_mimetype
-
-            if flask_mimetype != 'application/pdf':
-                try:
-                    magic_mimetype = magic.from_buffer(file_bytes, mime=True)
-                    final_content_type_for_storage = magic_mimetype
-                except Exception as e:
-                    current_app.logger.warning(f"Roast Resume: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
-            
-            file_storage_path = file_to_upload.filename 
-
-            extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
-                file_storage_path,
-                file_bytes,
-                file_options={"content-type": final_content_type_for_storage}
-            )
-            resume_url_for_xano = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
+    thread = threading.Thread(
+        target=perform_resume_analysis,
+        args=(
+            task_id, 
+            user_id, 
+            resume_url, 
+            job_description, 
+            data.get('company_website'), 
+            data.get('additional_comments', ''), 
+            data.get('resume_title', 'Uploaded Resume')
+        )
+    )
+    thread.start()
+    
+    return jsonify({'task_id': task_id}), 202
 
 
-            document_data = {
-                "uid": current_user_id, 
-                "document_name": file_to_upload.filename,
-                "document_type": flask_mimetype, 
-                "document_url": resume_url_for_xano,
-                "display_name": user_name,
-                "document_comments": "Uploaded for resume roast"
-            }
-            doc_insert_response = extensions.supabase.table("user_documents").insert(document_data).execute()
-            
-            if doc_insert_response.data and len(doc_insert_response.data) > 0 and doc_insert_response.data[0].get("id"):
-                resume_id_from_db = doc_insert_response.data[0].get("id")
-            else:
-                current_app.logger.warning(f"Warning: Could not get ID from user_documents insert for {resume_url_for_xano}. Response: {doc_insert_response}")
-
-        elif current_resume_url_form:
-            resume_url_for_xano = current_resume_url_form
-            try:
-                doc_query = extensions.supabase.table("user_documents") \
-                    .select("id") \
-                    .eq("document_url", resume_url_for_xano) \
-                    .eq("uid", current_user_id) \
-                    .single() \
-                    .execute()
-                if doc_query.data and doc_query.data.get("id"):
-                    resume_id_from_db = doc_query.data.get("id")
-                else:
-                    current_app.logger.warning(f"Warning: Could not find resume_id for existing URL: {resume_url_for_xano} and user: {current_user_id}")
-            except Exception as e:
-                current_app.logger.error(f"Error querying for resume_id for existing URL: {str(e)}")
-        else:
-            return jsonify({"error": "Missing resume input: provide 'current_resume_url' (form data) or upload a 'file' (multipart)"}), 400
-
-        if not resume_url_for_xano:
-             return jsonify({"error": "Failed to determine resume URL for processing"}), 500
-
-        xano_payload = {"current_resume": resume_url_for_xano}
-        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json()
-
-        feedback_content_for_db = xano_data  
-
-        raw_feedback_payload = xano_data.get("feedback")
-        if isinstance(raw_feedback_payload, str):
-            try:
-                parsed_inner_json = json.loads(raw_feedback_payload)
-                feedback_content_for_db = parsed_inner_json
-            except json.JSONDecodeError as e:
-                current_app.logger.warning(f"Roast Resume: Error decoding JSON string from 'feedback' key: {e}. Storing raw Xano response object instead.")
-            except TypeError: 
-                current_app.logger.warning(f"Roast Resume: Value for 'feedback' key was not a string (TypeError). Storing raw Xano response object.")
-
-        elif raw_feedback_payload is not None: 
-            current_app.logger.warning(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
-
-        db_payload = {
-            "user_id": current_user_id,
-            "user_name": user_name,
-            "current_resume": resume_url_for_xano,
-            "job_description": None, 
-            "company_website": None, 
-            "additional_comment": "Resume Roast Feedback", 
-            "feedback_analysis": feedback_content_for_db, 
-            "resume_id": resume_id_from_db
-        }
+@resume_analyze_bp.route('/task-status/<task_id>', methods=['GET'])
+@jwt_required()
+def get_task_status(task_id):
+    job = analysis_jobs.get(task_id)
+    if not job:
+        return jsonify({'status': 'NOT_FOUND', 'result': None}), 404
         
-        try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-            if not insert_response.data:
-                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume (roast) may have failed. Response: {insert_response}")
-        except Exception as e:
-            current_app.logger.error(f"Error inserting into analyze_resume table (roast): {str(e)}")
-
-        return jsonify(xano_data), xano_response.status_code
-
-    except requests.exceptions.HTTPError as http_err:
-        try:
-            error_detail = http_err.response.json()
-        except ValueError: 
-            error_detail = str(http_err.response.text)
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
-    except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
-    except Exception as e:
-        current_app.logger.error(f"Unexpected error in roast_resume: {str(e)}")
-        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
+    return jsonify(job), 200
