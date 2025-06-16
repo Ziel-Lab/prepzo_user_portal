@@ -11,20 +11,28 @@ class QuotaExceededError(Exception):
 
 def require_authentication(f):
     """
-    More robust decorator to protect routes and set g.user.
-    - Fails early if Authorization header is missing or malformed.
-    - Uses the low-level Supabase API to avoid 204 response quirks.
+    Decorator to protect routes, set g.user, and handle CORS preflight requests.
+    - This decorator now creates a full, self-contained response for OPTIONS requests
+      to ensure CORS preflights succeed before the main app logic is hit.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
         # Manually handle CORS preflight requests.
-        # This is necessary because this decorator runs before the Flask-CORS extension can.
+        # This is necessary because this decorator runs before the main Flask-CORS extension.
         if request.method == 'OPTIONS':
             response = make_response()
-            # These headers are needed for the browser to accept the subsequent request.
+            
+            # The browser needs to know which origin is allowed to make the request.
+            # We reflect the request's Origin header, which is standard and secure practice.
+            # The app-level Flask-CORS config will still validate this origin on the actual request.
+            origin = request.headers.get('Origin')
+            if origin:
+                response.headers.add('Access-Control-Allow-Origin', origin)
+            
+            # Specify what headers and methods are allowed in the actual request.
             response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
             response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
-            # The 'Access-Control-Allow-Origin' header is added by the Flask-CORS extension later.
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response, 200
 
         auth_header = request.headers.get("Authorization", "")
