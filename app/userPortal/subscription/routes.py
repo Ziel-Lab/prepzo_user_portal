@@ -123,8 +123,8 @@ def cancel_subscription():
         stripe_sub_id = sub_response.data.get('stripe_subscription_id')
         status = sub_response.data.get('status')
 
-        if status != 'active' or not stripe_sub_id:
-            return jsonify({"error": "No active paid subscription to cancel."}), 400
+        if status != 'pro' or not stripe_sub_id:
+            return jsonify({"error": "No active Pro subscription to cancel."}), 400
 
         # Retrieve the subscription object, modify it, and then save it.
         # This pattern is more compatible with older versions of the Stripe library.
@@ -185,12 +185,15 @@ def stripe_webhook():
             display_name = "N/A"
 
         paid_plan_id = 2 
+        stripe_price_id = None
         current_app.logger.info(f"Stripe checkout completed for uid {uid} (customer {customer_id}). Attempting to upgrade to paid plan_id: {paid_plan_id}.")
 
         try:
             stripe_sub = stripe.Subscription.retrieve(subscription_id)
             period_start = datetime.fromtimestamp(stripe_sub.current_period_start).date()
             period_end = datetime.fromtimestamp(stripe_sub.current_period_end).date()
+            if stripe_sub.items.data:
+                stripe_price_id = stripe_sub.items.data[0].price.id
         except Exception as e:
             current_app.logger.error(f"Failed to retrieve subscription {subscription_id} from Stripe: {e}. Falling back to manual date calculation.")
             period_start = date.today()
@@ -201,9 +204,11 @@ def stripe_webhook():
 
         subscription_data = {
             'plan_id': paid_plan_id, 
-            'status': 'active', 
+            'status': 'pro', 
+            'display_name': display_name,
             'stripe_subscription_id': subscription_id,
             'stripe_customer_id': customer_id,
+            'stripe_price_id': stripe_price_id,
             'current_period_start': str(period_start), 
             'current_period_end': str(period_end),
             'next_billing_date': str(period_end),
@@ -268,7 +273,7 @@ def stripe_webhook():
                     'next_billing_date': str(next_period_end),
                     'updated_at': datetime.utcnow().isoformat(),
                     'stripe_subscription_id': subscription_id, 
-                    'status': 'active' 
+                    'status': 'pro' 
                 }).eq('id', sub_id).execute()
                 
                 current_app.logger.info(f"--- STRIPE WEBHOOK: Creating new usage record for user {uid} for period {next_period_start} - {next_period_end} ---")
@@ -288,17 +293,20 @@ def stripe_webhook():
         subscription = data
         customer_id = subscription['customer']
         
-        sub_res = supabase.table('user_subscriptions').select('id').eq('stripe_customer_id', customer_id).maybe_single().execute()
+        sub_res = supabase.table('user_subscriptions').select('id', 'user_id').eq('stripe_customer_id', customer_id).maybe_single().execute()
 
         if sub_res.data:
             sub_id = sub_res.data['id']
+            uid = sub_res.data['user_id']
             period_start = date.today().replace(day=1)
             period_end = get_last_day_of_month(date.today())
-
+            
+            # Downgrade user to the free plan (id=1) and set status to 'free'
+            current_app.logger.info(f"Subscription deleted for user {uid}. Downgrading to free plan.")
             supabase.table('user_subscriptions').update({
                 'plan_id': 1,
                 'stripe_subscription_id': None,
-                'status': 'active',
+                'status': 'free',
                 'current_period_start': str(period_start),
                 'current_period_end': str(period_end),
                 'next_billing_date': None,

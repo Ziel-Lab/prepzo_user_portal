@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta
-from flask import jsonify, g, request, current_app
+from flask import jsonify, g, request, current_app, make_response
 from app import extensions 
 from functools import wraps
 import calendar
@@ -17,6 +17,16 @@ def require_authentication(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # Manually handle CORS preflight requests.
+        # This is necessary because this decorator runs before the Flask-CORS extension can.
+        if request.method == 'OPTIONS':
+            response = make_response()
+            # These headers are needed for the browser to accept the subsequent request.
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
+            # The 'Access-Control-Allow-Origin' header is added by the Flask-CORS extension later.
+            return response, 200
+
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             current_app.logger.warning(f"Bad or missing Authorization header received: {auth_header!r}")
@@ -144,7 +154,7 @@ def check_and_use_feature(feature_name, increment_by=1):
 
                     # Create the subscription record
                     new_sub_res = supabase.table('user_subscriptions').insert({
-                        'user_id': uid, 'plan_id': 1, 'status': 'active',
+                        'user_id': uid, 'plan_id': 1, 'status': 'free',
                         'current_period_start': str(period_start), 'current_period_end': str(period_end)
                     }).execute()
                     
