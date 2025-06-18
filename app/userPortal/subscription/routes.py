@@ -1,12 +1,14 @@
 # routes.py
 from flask import request, jsonify, current_app, g
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import stripe
+from dateutil.relativedelta import relativedelta
 from . import subscription_bp
 from app import extensions
 from .helpers import check_and_use_feature, get_last_day_of_month, require_authentication
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
+import json
 
 @subscription_bp.route("/status", methods=["GET", "OPTIONS"])
 @require_authentication
@@ -68,43 +70,94 @@ def get_subscription_status():
         current_app.logger.error(f"An unexpected exception occurred in /subscription/status for user {uid}: {e}", exc_info=True)
         return jsonify({"error": "An unexpected server error occurred while fetching subscription status."}), 500
 
-@subscription_bp.route("/stripe/create-checkout-session", methods=["POST"])
+@subscription_bp.route("/customer-portal", methods=["POST", "OPTIONS"])
 @require_authentication
-def create_checkout_session():
-    """Creates a Stripe Checkout session for upgrading to the paid plan."""
-    stripe.api_key = current_app.config.get("STRIPE_SECRET_KEY")
-    PAID_PLAN_PRICE_ID = current_app.config.get("STRIPE_PAID_PLAN_PRICE_ID")
-    FRONTEND_URL = current_app.config.get("FRONTEND_URL")
-
-    if not all([stripe.api_key, PAID_PLAN_PRICE_ID, FRONTEND_URL]):
-        current_app.logger.warning("Stripe is not configured. Missing secret key, price ID, or frontend URL.")
+def create_customer_portal_session():
+    """
+    Creates a Stripe Customer Portal session for the user to manage their subscription.
+    """
+    stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
+    if not stripe.api_key:
         return jsonify({"error": "This feature is not configured on the server."}), 503
 
     supabase = extensions.supabase
     uid = g.user.id
-    user_email = g.user.email
 
     try:
+        # Fetch the user's stripe_customer_id
         sub_response = supabase.table('user_subscriptions').select('stripe_customer_id').eq('user_id', uid).single().execute()
-        customer_id = sub_response.data.get('stripe_customer_id')
+        
+        if not sub_response.data or not sub_response.data.get('stripe_customer_id'):
+            return jsonify({"error": "Stripe customer information not found."}), 404
 
-        if not customer_id:
-            customer = stripe.Customer.create(email=user_email, metadata={'supabase_uid': uid})
-            customer_id = customer.id
-            supabase.table('user_subscriptions').update({'stripe_customer_id': customer_id}).eq('user_id', uid).execute()
+        stripe_customer_id = sub_response.data['stripe_customer_id']
+        
+        # Base return URL from config
+        frontend_url = current_app.config.get('FRONTEND_ORIGIN')
+        if not frontend_url:
+             current_app.logger.error("FATAL: FRONTEND_ORIGIN is not configured on the server.")
+             return jsonify({"error": "Application is not configured correctly. Unable to determine a return URL."}), 503
 
-        checkout_session = stripe.checkout.Session.create(
-            mode='subscription',
-            customer=customer_id,
-            client_reference_id=uid,
-            line_items=[{'price': PAID_PLAN_PRICE_ID, 'quantity': 1}],
-            success_url=f'{FRONTEND_URL}/dashboard/settings?session_id={{CHECKOUT_SESSION_ID}}',
-            cancel_url=f'{FRONTEND_URL}/billing/cancel',
+        return_url = f"{frontend_url}/dashboard/settings/subscription"
+
+        # For POST requests, allow the frontend to override the return URL.
+        # GET requests with bodies are not reliable.
+        if request.method == "POST":
+            try:
+                data = request.get_json()
+                if data and 'return_url' in data:
+                    # Basic validation to ensure it's a URL within the app's domain
+                    if data['return_url'].startswith(frontend_url):
+                        return_url = data['return_url']
+            except Exception:
+                # Ignore if body is not valid json or other parsing issues.
+                pass
+
+        portal_session = stripe.billing_portal.Session.create(
+            customer=stripe_customer_id,
+            return_url=return_url,
         )
-        return jsonify({'sessionId': checkout_session.id}), 200
+        
+        return jsonify({"url": portal_session.url}), 200
+
     except Exception as e:
-        current_app.logger.error(f"Stripe checkout session creation failed: {e}")
-        return jsonify({'error': str(e)}), 500
+        current_app.logger.error(f"Stripe customer portal session creation failed for user {uid}: {e}", exc_info=True)
+        return jsonify({'error': "Could not create a billing management session."}), 500
+
+@subscription_bp.route("/invoices", methods=["GET"])
+@require_authentication
+def get_invoices():
+    """
+    Fetches a list of the user's past invoices from Stripe.
+    """
+    stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
+    if not stripe.api_key:
+        return jsonify({"error": "This feature is not configured on the server."}), 503
+
+    supabase = extensions.supabase
+    uid = g.user.id
+
+    try:
+        # Fetch the user's stripe_customer_id
+        sub_response = supabase.table('user_subscriptions').select('stripe_customer_id').eq('user_id', uid).single().execute()
+        
+        stripe_customer_id = sub_response.data.get('stripe_customer_id') if sub_response.data else None
+
+        if not stripe_customer_id:
+            # If there's no customer ID, they have no invoices. Return empty list.
+            return jsonify([]), 200
+
+        # Fetch invoices from Stripe, expanding the charge to get payment details
+        invoices = stripe.Invoice.list(customer=stripe_customer_id, limit=24, expand=['data.charge'])
+        
+        return jsonify(invoices.data), 200
+
+    except APIError as e:
+        current_app.logger.error(f"DATABASE API_ERROR in /subscription/invoices for user {uid}: {e}", exc_info=True)
+        return jsonify({"error": "A database error occurred while fetching your billing history.", "details": str(e.message)}), 500
+    except Exception as e:
+        current_app.logger.error(f"Stripe invoice fetching failed for user {uid}: {e}", exc_info=True)
+        return jsonify({'error': "Could not retrieve billing history."}), 500
 
 @subscription_bp.route("/stripe/cancel-subscription", methods=["POST", "OPTIONS"])
 @require_authentication
@@ -136,7 +189,7 @@ def cancel_subscription():
         subscription.cancel_at_period_end = True
         subscription.save()
 
-        # mark us “canceling” locally
+        # mark us "canceling" locally
         supabase.table('user_subscriptions').update({
             'status': 'canceling',
             'updated_at': datetime.utcnow().isoformat()
@@ -150,6 +203,56 @@ def cancel_subscription():
         current_app.logger.error(f"Stripe cancellation failed: {e}")
         return jsonify({'error': str(e)}), 500
 
+@subscription_bp.route("/stripe/reactivate-subscription", methods=["POST"])
+@require_authentication
+def reactivate_subscription():
+    """
+    Allows a user to undo their subscription cancellation before the period ends.
+    This simply resets the status to 'active' without changing any dates.
+    """
+    stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
+    if not stripe.api_key:
+        return jsonify({"error": "This feature is not configured on the server."}), 503
+
+    supabase = extensions.supabase
+    uid = g.user.id
+
+    try:
+        # 1. Fetch the user's current subscription details
+        sub_response = supabase.table('user_subscriptions').select(
+            'stripe_subscription_id, status'
+        ).eq('user_id', uid).single().execute()
+
+        if not sub_response.data:
+            return jsonify({"error": "Subscription not found."}), 404
+
+        sub_data = sub_response.data
+        stripe_sub_id = sub_data.get('stripe_subscription_id')
+        status = sub_data.get('status')
+
+        # 2. Check if the subscription is actually in the 'canceling' state
+        if status != 'canceling' or not stripe_sub_id:
+            return jsonify({"error": "Subscription is not scheduled for cancellation."}), 400
+
+        # 3. Tell Stripe to reactivate the subscription by clearing the cancellation flag
+        stripe.Subscription.modify(
+            stripe_sub_id,
+            cancel_at_period_end=False
+        )
+
+        # 4. Update the local database status back to 'active'
+        update_payload = {
+            'status': 'active',
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        
+        supabase.table('user_subscriptions').update(update_payload).eq('user_id', uid).execute()
+
+        return jsonify({"message": "Subscription reactivated successfully."}), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Stripe reactivation failed for user {uid}: {e}", exc_info=True)
+        return jsonify({'error': "Could not reactivate subscription."}), 500
 
 @subscription_bp.route("/stripe/webhook", methods=["POST", "OPTIONS"])
 def stripe_webhook():
@@ -218,15 +321,20 @@ def stripe_webhook():
             return jsonify(success=True)
 
         try:
-            next_period_start = str(datetime.fromtimestamp(invoice.get('period_start')).date())
-            next_period_end = str(datetime.fromtimestamp(invoice.get('period_end')).date())
+            # The subscription object is the source of truth for the billing period.
+            subscription = stripe.Subscription.retrieve(subscription_id)
+
+            # Get the authoritative start and end dates from Stripe.
+            # The database function will handle the one-month logic for the end date.
+            next_period_start = str(datetime.fromtimestamp(subscription.current_period_start, tz=timezone.utc).date())
+            next_period_end = str(datetime.fromtimestamp(subscription.current_period_end, tz=timezone.utc).date())
 
             current_app.logger.info(f"Activating subscription for customer {customer_id} from invoice {invoice.get('id')}.")
             supabase.rpc('activate_subscription_from_invoice', {
                 'p_stripe_customer_id': customer_id,
                 'p_stripe_subscription_id': subscription_id,
                 'p_next_period_start': next_period_start,
-                'p_next_period_end': next_period_end
+                'p_next_period_end': next_period_end # NOTE: This value is now ignored by the DB function.
             }).execute()
             current_app.logger.info(f"Successfully activated subscription for customer {customer_id}")
 
@@ -268,14 +376,6 @@ def stripe_webhook():
                 }).eq('id', sub_id).execute()
 
     return jsonify(success=True)
-
-@subscription_bp.route("/protected/resume-analyzer", methods=["POST"])
-@require_authentication
-@check_and_use_feature('resume', increment_by=1)
-def analyze_resume_example():
-    # If the code reaches here, the user has quota and it has been decremented.
-    # Proceed with the actual feature logic.
-    return jsonify({"message": f"Successfully used the resume analyzer feature. User: {g.user.id}"})
 
 @subscription_bp.route("/test-db-write", methods=["POST"])
 @require_authentication
