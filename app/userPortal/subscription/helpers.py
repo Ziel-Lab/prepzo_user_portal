@@ -4,6 +4,7 @@ from app import extensions
 from functools import wraps
 import calendar
 from postgrest.exceptions import APIError
+from gotrue.errors import AuthApiError
 
 
 class QuotaExceededError(Exception):
@@ -52,6 +53,12 @@ def require_authentication(f):
                 raise ValueError("Supabase did not return a user object in the response.")
             g.user = user
 
+        except AuthApiError as e:
+            # This specific error means the user's JWT is valid but the session/user
+            # is not found on Supabase side (e.g., user deleted, session logged out).
+            # This is a client-side issue (stale token).
+            current_app.logger.warning(f"Authentication failed with stale JWT: {e.message}")
+            return jsonify({"error": "Your session has expired. Please log in again.", "details": str(e.message)}), 401
         except APIError as e:
             current_app.logger.error(f"Authentication API call failed: {e}", exc_info=True)
             error_details = e.message if isinstance(e.message, dict) else str(e.message)

@@ -256,7 +256,7 @@ def reactivate_subscription():
 @subscription_bp.route("/stripe/webhook", methods=["POST", "OPTIONS"])
 def stripe_webhook():
     """Handles incoming webhooks from Stripe to update subscription status in the DB."""
-    current_app.logger.critical("--- STRIPE WEBHOOK ENDPOINT HIT! ---") # <-- TEMPORARY DIAGNOSTIC LOG
+    current_app.logger.critical("--- STRIPE WEBHOOK ENDPOINT HIT! ---")
 
     stripe_webhook_secret = current_app.config.get("STRIPE_WEBHOOK_SECRET")
     stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
@@ -289,27 +289,13 @@ def stripe_webhook():
             return jsonify(success=True)
 
         try:
-            paid_plan_id = 2 # The ID for your "Pro" plan
-
-            # Fetch the user's auth record to get their correct, up-to-date name.
-            auth_user_res = supabase.auth.admin.get_user_by_id(uid)
-            display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
-
-            # Fetch the subscription from Stripe to get the authoritative start date.
-            subscription = stripe.Subscription.retrieve(subscription_id)
-            period_start = str(datetime.fromtimestamp(subscription.current_period_start, tz=timezone.utc).date())
-
-            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} ({display_name}) from checkout session {session.get('id')}.")
-            supabase.rpc('provision_stripe_subscription', {
+            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} from session {session.get('id')}. Waiting for payment success to activate.")
+            supabase.rpc('provision_stripe_ids', {
                 'p_user_id': uid,
                 'p_stripe_customer_id': customer_id,
                 'p_stripe_subscription_id': subscription_id,
-                'p_plan_id': paid_plan_id,
-                'p_display_name': display_name,
-                'p_period_start': period_start # Pass the correct start date to the DB function
             }).execute()
-            current_app.logger.info(f"Successfully provisioned Stripe info for user {uid}")
-
+            current_app.logger.info(f"Successfully provisioned Stripe IDs for user {uid}")
         except Exception as e:
             error_message = f"Webhook processing failed for '{event_type}'. User: {uid}. Error: {e}"
             current_app.logger.error(error_message, exc_info=True)
@@ -320,25 +306,22 @@ def stripe_webhook():
         customer_id = invoice.get('customer')
         subscription_id = invoice.get('subscription')
         
-        if not all([customer_id, subscription_id]):
-            current_app.logger.error(f"Webhook Error: 'invoice.payment_succeeded' is missing required IDs. Invoice: {invoice.get('id')}")
+        if not customer_id or not subscription_id:
+            # Not a subscription invoice, ignore.
             return jsonify(success=True)
 
         try:
-            # The subscription object is the source of truth for the billing period.
-            subscription = stripe.Subscription.retrieve(subscription_id)
+            # The invoice object itself contains the exact billing period that was just paid for.
+            period_start = str(datetime.fromtimestamp(invoice.period_start, tz=timezone.utc).date())
+            paid_plan_id = 2 # The ID for your "Pro" plan
 
-            # Get the authoritative start and end dates from Stripe.
-            # The database function will handle the one-month logic for the end date.
-            next_period_start = str(datetime.fromtimestamp(subscription.current_period_start, tz=timezone.utc).date())
-            next_period_end = str(datetime.fromtimestamp(subscription.current_period_end, tz=timezone.utc).date())
-
-            current_app.logger.info(f"Activating subscription for customer {customer_id} from invoice {invoice.get('id')}.")
+            current_app.logger.info(f"Activating subscription {subscription_id} for customer {customer_id} via invoice {invoice.get('id')}.")
+            
             supabase.rpc('activate_subscription_from_invoice', {
                 'p_stripe_customer_id': customer_id,
                 'p_stripe_subscription_id': subscription_id,
-                'p_next_period_start': next_period_start,
-                'p_next_period_end': next_period_end # NOTE: This value is now ignored by the DB function.
+                'p_plan_id': paid_plan_id,
+                'p_period_start': period_start
             }).execute()
             current_app.logger.info(f"Successfully activated subscription for customer {customer_id}")
 
