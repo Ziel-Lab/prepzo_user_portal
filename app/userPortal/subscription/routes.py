@@ -295,13 +295,18 @@ def stripe_webhook():
             auth_user_res = supabase.auth.admin.get_user_by_id(uid)
             display_name = auth_user_res.user.user_metadata.get('full_name') or auth_user_res.user.user_metadata.get('name', 'N/A')
 
+            # Fetch the subscription from Stripe to get the authoritative start date.
+            subscription = stripe.Subscription.retrieve(subscription_id)
+            period_start = str(datetime.fromtimestamp(subscription.current_period_start, tz=timezone.utc).date())
+
             current_app.logger.info(f"Provisioning Stripe IDs for user {uid} ({display_name}) from checkout session {session.get('id')}.")
             supabase.rpc('provision_stripe_subscription', {
                 'p_user_id': uid,
                 'p_stripe_customer_id': customer_id,
                 'p_stripe_subscription_id': subscription_id,
                 'p_plan_id': paid_plan_id,
-                'p_display_name': display_name # Pass the correct name to the DB function
+                'p_display_name': display_name,
+                'p_period_start': period_start # Pass the correct start date to the DB function
             }).execute()
             current_app.logger.info(f"Successfully provisioned Stripe info for user {uid}")
 

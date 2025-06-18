@@ -80,28 +80,29 @@ def get_next_period(current_period_end):
     return next_period_start, next_period_end
 
 def handle_period_rollover(supabase, uid, subscription):
-    """Handles the rollover to a new billing period if needed."""
+    """
+    Checks if the user's billing period has expired and, if so, updates
+    the user_subscriptions table with the new period dates.
+    It does NOT create a feature_usage record; that is left to the caller.
+    """
     today = date.today()
 
     # --- Start: Robust check for required date fields ---
     sub_id = subscription.get('id')
     if not subscription.get('current_period_end'):
-        current_app.logger.error(f"CRITICAL: Subscription {sub_id} for user {uid} is missing 'current_period_end'. Cannot check feature usage.")
+        current_app.logger.error(f"CRITICAL: Subscription {sub_id} for user {uid} is missing 'current_period_end'. Cannot check for rollover.")
         raise ValueError(f"Subscription {sub_id} is missing its period end date.")
-    if not subscription.get('current_period_start'):
-        current_app.logger.error(f"CRITICAL: Subscription {sub_id} for user {uid} is missing 'current_period_start'. Cannot check feature usage.")
-        raise ValueError(f"Subscription {sub_id} is missing its period start date.")
     # --- End: Robust check ---
 
     current_period_end = datetime.strptime(subscription['current_period_end'], '%Y-%m-%d').date()
 
     if today > current_period_end:
-        current_app.logger.info(f"User {uid} billing period expired on {current_period_end}. Rolling over.")
+        current_app.logger.info(f"User {uid} billing period expired on {current_period_end}. Rolling over subscription dates.")
         
         next_period_start, next_period_end = get_next_period(current_period_end)
         
         # Update user_subscriptions with the new period
-        updated_sub, error = supabase.table('user_subscriptions') \
+        updated_sub_res = supabase.table('user_subscriptions') \
             .update({
                 'current_period_start': str(next_period_start),
                 'current_period_end': str(next_period_end)
@@ -109,30 +110,10 @@ def handle_period_rollover(supabase, uid, subscription):
             .eq('id', subscription['id']) \
             .execute()
         
-        if error or not updated_sub.data:
-             current_app.logger.error(f"Failed to update subscription period for user {uid}. Raw Error: {error}. Response Data: {updated_sub}")
-             raise Exception(f"Failed to update subscription period for user {uid}")
-
-        # Insert a new feature_usage record for the new period
-        new_usage, error = supabase.table('feature_usage') \
-            .insert({
-                'user_id': uid,
-                'plan_id': subscription['plan_id'],
-                'period_start': str(next_period_start),
-                'period_end': str(next_period_end)
-            }) \
-            .execute()
-            
-        if error or not new_usage.data:
-            # This could happen if a rollover was already processed by a concurrent request
-            current_app.logger.warning(f"Could not insert new feature usage for {uid}, it might already exist. Error: {error}")
-
-        # Return the new period dates to be used in the calling function
-        return next_period_start, next_period_end
-    
-    # No rollover needed, return current period
-    return datetime.strptime(subscription['current_period_start'], '%Y-%m-%d').date(), current_period_end
-
+        if not updated_sub_res or not updated_sub_res.data:
+             error_msg = f"Failed to update subscription period for user {uid}. DB response was empty."
+             current_app.logger.error(error_msg)
+             raise Exception(error_msg)
 
 def check_and_use_feature(feature_name, increment_by=1):
     """
@@ -185,25 +166,15 @@ def check_and_use_feature(feature_name, increment_by=1):
                         return jsonify({"error": "Failed to initialize your user profile."}), 500
                     subscription_record = new_sub_res.data[0] # insert() returns a list, take the first item.
 
-                    # Create the initial usage record
-                    new_usage_res = supabase.table('feature_usage').insert({
-                        'user_id': uid, 'plan_id': 1, 'period_start': str(period_start), 'period_end': str(period_end),
-                        'resume_count': 0, 'linkedin_optimize_count': 0, 'cover_letter_count': 0, 'display_name': display_name
-                    }).execute()
-                    
-                    if not new_usage_res or not new_usage_res.data:
-                        return jsonify({"error": "Failed to initialize usage tracking."}), 500
-                    usage_record = new_usage_res.data[0] # insert() returns a list, take the first item.
-
-                # Now, get the plan limits from the unified subscription_record
+                # Now that the subscription record is guaranteed to be up-to-date,
+                # we can fetch or create the usage record for the correct period.
                 plan_id = subscription_record['plan_id']
                 plan_res = supabase.table('subscription_plans').select('*').eq('id', plan_id).single().execute()
                 
                 if not plan_res or not plan_res.data:
                     current_app.logger.error(f"Could not fetch plan details for plan_id {plan_id}.")
                     return jsonify({"error": "Could not verify your subscription plan details."}), 500
-
-                # Step 3 & 4: Get or create the usage record for the current period.
+                
                 period_start = subscription_record['current_period_start']
                 period_end = subscription_record['current_period_end']
                 
@@ -223,7 +194,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                     new_usage_res = supabase.table('feature_usage').insert(initial_usage).execute()
                     if not new_usage_res or not new_usage_res.data:
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500
-                    usage_record = new_usage_res.data[0] # insert() returns a list, take the first item.
+                    usage_record = new_usage_res.data[0]
 
                 # Step 5: Compare usage against the plan's limit using the unified usage_record
                 usage_count_col = f"{feature_name}_count"
