@@ -240,7 +240,6 @@ def reactivate_subscription():
             cancel_at_period_end=False
         )
 
-        # 4. Update the local database status back to 'active'
         update_payload = {
             'status': 'active',
             'updated_at': datetime.utcnow().isoformat()
