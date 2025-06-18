@@ -159,6 +159,17 @@ def check_and_use_feature(feature_name, increment_by=1):
                     return jsonify({"error": "A database error occurred. Please try again later."}), 503
                 subscription_record = sub_res.data # Will be a dict if found, None if not.
 
+                # If a subscription exists, handle a potential period rollover before any other checks.
+                # This ensures the user is always associated with the correct billing period.
+                if subscription_record:
+                    handle_period_rollover(supabase, uid, subscription_record)
+                    # After a potential rollover, we refetch the subscription to guarantee we have the latest dates.
+                    sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
+                    if not sub_res:
+                        current_app.logger.error(f"DB query for subscription for user {uid} returned None after rollover. Aborting.")
+                        return jsonify({"error": "A database error occurred. Please try again later."}), 503
+                    subscription_record = sub_res.data
+
                 if not subscription_record:
                     current_app.logger.info(f"User {uid} has no subscription record. Creating default free plan entries.")
                     period_start = date.today().replace(day=1)
