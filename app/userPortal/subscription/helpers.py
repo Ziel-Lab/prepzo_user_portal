@@ -153,6 +153,10 @@ def check_and_use_feature(feature_name, increment_by=1):
                 
                 # Step 1 & 2: Get or create the user's subscription record.
                 sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
+                
+                if not sub_res:
+                    current_app.logger.error(f"DB query for subscription for user {uid} returned None. Aborting.")
+                    return jsonify({"error": "A database error occurred. Please try again later."}), 503
                 subscription_record = sub_res.data # Will be a dict if found, None if not.
 
                 if not subscription_record:
@@ -166,7 +170,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                         'current_period_start': str(period_start), 'current_period_end': str(period_end)
                     }).execute()
                     
-                    if not new_sub_res.data:
+                    if not new_sub_res or not new_sub_res.data:
                         return jsonify({"error": "Failed to initialize your user profile."}), 500
                     subscription_record = new_sub_res.data[0] # insert() returns a list, take the first item.
 
@@ -176,19 +180,27 @@ def check_and_use_feature(feature_name, increment_by=1):
                         'resume_count': 0, 'linkedin_optimize_count': 0, 'cover_letter_count': 0, 'display_name': display_name
                     }).execute()
                     
-                    if not new_usage_res.data:
+                    if not new_usage_res or not new_usage_res.data:
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500
                     usage_record = new_usage_res.data[0] # insert() returns a list, take the first item.
 
                 # Now, get the plan limits from the unified subscription_record
                 plan_id = subscription_record['plan_id']
                 plan_res = supabase.table('subscription_plans').select('*').eq('id', plan_id).single().execute()
+                
+                if not plan_res or not plan_res.data:
+                    current_app.logger.error(f"Could not fetch plan details for plan_id {plan_id}.")
+                    return jsonify({"error": "Could not verify your subscription plan details."}), 500
 
                 # Step 3 & 4: Get or create the usage record for the current period.
                 period_start = subscription_record['current_period_start']
                 period_end = subscription_record['current_period_end']
                 
                 usage_res = supabase.table('feature_usage').select('*').eq('user_id', uid).eq('period_start', period_start).eq('period_end', period_end).maybe_single().execute()
+                
+                if not usage_res:
+                    current_app.logger.error(f"DB query for usage record for user {uid} returned None. Aborting.")
+                    return jsonify({"error": "A database error occurred. Please try again later."}), 503
                 usage_record = usage_res.data # Will be a dict if found, None if not.
                     
                 if not usage_record:
@@ -198,7 +210,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                         'resume_count': 0, 'linkedin_optimize_count': 0, 'cover_letter_count': 0, 'display_name': display_name
                     }
                     new_usage_res = supabase.table('feature_usage').insert(initial_usage).execute()
-                    if not new_usage_res.data:
+                    if not new_usage_res or not new_usage_res.data:
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500
                     usage_record = new_usage_res.data[0] # insert() returns a list, take the first item.
 
