@@ -5,9 +5,25 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 
 from . import job_listing_bp
 
+# --- NEW: add uniform CORS headers for every response from this blueprint ---
+@job_listing_bp.after_request
+def _add_cors_headers(resp):
+    """
+    Ensure all job-listing responses (including OPTIONS pre-flight) have
+    the required CORS headers so the browser lets the request through.
+    """
+    origin = request.headers.get("Origin")
+    if origin:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    return resp
+# ---------------------------------------------------------------------------
 
 @job_listing_bp.route("/search-jobs", methods=["POST", "OPTIONS"])
 @require_authentication
+@check_and_use_feature("job_search_results")
 def search_jobs():
     """Proxy endpoint to search job listings via TheirStack API.
 
@@ -43,7 +59,12 @@ def search_jobs():
             "Authorization": f"Bearer {api_key}",
         }
 
-        response = requests.post(theirstack_url, headers=headers, json=client_payload)
+        response = requests.post(
+            theirstack_url,
+            headers=headers,
+            json=client_payload,
+            timeout=request_timeout,
+        )
         response.raise_for_status()
 
         return jsonify(response.json()), response.status_code
@@ -77,7 +98,7 @@ def search_jobs():
 
 @job_listing_bp.route("/get-job-details", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature("job_search_results_count")
+@check_and_use_feature("job_search_results")
 def get_job_details():
     """Proxy endpoint to search job listings via TheirStack API.
 
@@ -113,7 +134,12 @@ def get_job_details():
             "Authorization": f"Bearer {api_key}",
         }
 
-        response = requests.post(theirstack_url, headers=headers, json=client_payload)
+        response = requests.post(
+            theirstack_url,
+            headers=headers,
+            json=client_payload,
+            timeout=request_timeout,
+        )
         response.raise_for_status()
 
         return jsonify(response.json()), response.status_code
