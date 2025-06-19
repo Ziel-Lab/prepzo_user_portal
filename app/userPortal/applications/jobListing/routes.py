@@ -5,20 +5,20 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 
 from . import job_listing_bp
 
-# --- NEW: add uniform CORS headers for every response from this blueprint ---
-@job_listing_bp.after_request
-def _add_cors_headers(resp):
-    """
-    Ensure all job-listing responses (including OPTIONS pre-flight) have
-    the required CORS headers so the browser lets the request through.
-    """
-    origin = request.headers.get("Origin")
-    if origin:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
-    resp.headers["Access-Control-Allow-Credentials"] = "true"
-    return resp
+
+# @job_listing_bp.after_request
+# def _add_cors_headers(resp):
+#     """
+#     Ensure all job-listing responses (including OPTIONS pre-flight) have
+#     the required CORS headers so the browser lets the request through.
+#     """
+#     origin = request.headers.get("Origin")
+#     if origin:
+#         resp.headers["Access-Control-Allow-Origin"] = origin
+#     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+#     resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
+#     resp.headers["Access-Control-Allow-Credentials"] = "true"
+#     return resp
 # ---------------------------------------------------------------------------
 
 @job_listing_bp.route("/search-jobs", methods=["POST", "OPTIONS"])
