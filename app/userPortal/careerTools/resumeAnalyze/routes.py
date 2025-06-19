@@ -15,7 +15,6 @@ def analyze_resume():
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-
     xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
     
     try:
