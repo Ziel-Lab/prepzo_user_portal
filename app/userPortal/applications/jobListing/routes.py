@@ -23,7 +23,6 @@ from . import job_listing_bp
 
 @job_listing_bp.route("/search-jobs", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature("job_search_results")
 def search_jobs():
     """Proxy endpoint to search job listings via TheirStack API.
 
