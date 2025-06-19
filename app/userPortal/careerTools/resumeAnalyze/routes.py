@@ -35,7 +35,7 @@ def analyze_resume():
             "additional_comments": additional_comment_text
         }
 
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload)
+        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=180)
         xano_response.raise_for_status()
         xano_data = xano_response.json() 
 
@@ -188,7 +188,7 @@ def roast_resume():
              return jsonify({"error": "Failed to determine resume URL for processing"}), 500
 
         xano_payload = {"current_resume": resume_url_for_xano}
-        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload)
+        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload, timeout=180)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
