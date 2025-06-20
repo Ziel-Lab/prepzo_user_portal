@@ -78,6 +78,13 @@ def get_first_day_of_month(dt):
 def get_last_day_of_month(dt):
     return dt.replace(day=calendar.monthrange(dt.year, dt.month)[1])
 
+def get_user_display_name(user):
+    """Safely retrieves the display name from a user object."""
+    if not user or not hasattr(user, 'user_metadata') or not user.user_metadata:
+        return 'N/A'
+    # Prioritize 'full_name', then 'name', and finally 'N/A'
+    return user.user_metadata.get('full_name') or user.user_metadata.get('name') or 'N/A'
+
 def get_next_period(current_period_end):
     """Calculates the start and end of the next billing period."""
     # Start of the next month
@@ -137,7 +144,7 @@ def check_and_use_feature(feature_name, increment_by=1):
             try:
                 supabase = extensions.supabase
                 uid = g.user.id
-                display_name = g.user.user_metadata.get('full_name') or g.user.user_metadata.get('name', 'N/A')
+                display_name = get_user_display_name(g.user)
                 
                 # Step 1 & 2: Get or create the user's subscription record.
                 sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
@@ -157,21 +164,30 @@ def check_and_use_feature(feature_name, increment_by=1):
                         current_app.logger.error(f"DB query for subscription for user {uid} returned None after rollover. Aborting.")
                         return jsonify({"error": "A database error occurred. Please try again later."}), 503
                     subscription_record = sub_res.data
+                    
+                    # After refetching, check and update the display name if it's out of date.
+                    if subscription_record and subscription_record.get('display_name') != display_name:
+                        current_app.logger.info(f"Updating stale display_name for user {uid} in user_subscriptions.")
+                        supabase.table('user_subscriptions').update({'display_name': display_name}).eq('user_id', uid).execute()
 
                 if not subscription_record:
                     current_app.logger.info(f"User {uid} has no subscription record. Creating default free plan entries.")
-                    period_start = date.today().replace(day=1)
+                    period_start = get_first_day_of_month(date.today())
                     period_end = get_last_day_of_month(date.today())
 
-                    # Create the subscription record
+                    # Create the subscription record, relying on DB defaults for plan_id and status.
                     new_sub_res = supabase.table('user_subscriptions').insert({
-                        'user_id': uid, 'plan_id': 1, 'status': 'free', 'display_name': display_name,
-                        'current_period_start': str(period_start), 'current_period_end': str(period_end)
-                    }).execute()
+                        'user_id': uid,
+                        'display_name': display_name,
+                        'current_period_start': str(period_start),
+                        'current_period_end': str(period_end)
+                    }, returning='representation').execute()
                     
                     if not new_sub_res or not new_sub_res.data:
+                        current_app.logger.error(f"Failed to create subscription for user {uid}. DB Response: {getattr(new_sub_res, 'data', 'N/A')}")
                         return jsonify({"error": "Failed to initialize your user profile."}), 500
-                    subscription_record = new_sub_res.data[0] # insert() returns a list, take the first item.
+                    
+                    subscription_record = new_sub_res.data[0]
 
                 # Now that the subscription record is guaranteed to be up-to-date,
                 # we can fetch or create the usage record for the correct period.
@@ -192,15 +208,28 @@ def check_and_use_feature(feature_name, increment_by=1):
                     return jsonify({"error": "A database error occurred. Please try again later."}), 503
                 usage_record = usage_res.data # Will be a dict if found, None if not.
                     
+                # If a usage record exists, check if the display name is stale and update it.
+                if usage_record and usage_record.get('display_name') != display_name:
+                    current_app.logger.info(f"Updating stale display_name for user {uid} in feature_usage for period starting {period_start}.")
+                    supabase.table('feature_usage').update({'display_name': display_name}).eq('id', usage_record['id']).execute()
+
                 if not usage_record:
                     current_app.logger.info(f"No usage record for user {uid} for period {period_start}-{period_end}. Creating one.")
+                    
+                    # Rely on DB defaults for all count fields.
                     initial_usage = {
-                        'user_id': uid, 'plan_id': plan_id, 'period_start': period_start, 'period_end': period_end,
-                        'resume_count': 0, 'linkedin_optimize_count': 0, 'cover_letter_count': 0, 'display_name': display_name
+                        'user_id': uid,
+                        'plan_id': plan_id,
+                        'period_start': period_start,
+                        'period_end': period_end,
+                        'display_name': display_name
                     }
-                    new_usage_res = supabase.table('feature_usage').insert(initial_usage).execute()
+                    new_usage_res = supabase.table('feature_usage').insert(initial_usage, returning='representation').execute()
+                    
                     if not new_usage_res or not new_usage_res.data:
+                        current_app.logger.error(f"Failed to create feature_usage for user {uid}. DB Response: {getattr(new_usage_res, 'data', 'N/A')}")
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500
+                    
                     usage_record = new_usage_res.data[0]
 
                 # Step 5: Compare usage against the plan's limit using the unified usage_record
