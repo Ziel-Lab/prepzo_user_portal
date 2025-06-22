@@ -5,7 +5,7 @@ import stripe
 from dateutil.relativedelta import relativedelta
 from . import subscription_bp
 from app import extensions
-from .helpers import check_and_use_feature, get_last_day_of_month, require_authentication
+from .helpers import check_and_use_feature, get_last_day_of_month, require_authentication, get_first_day_of_month, get_user_display_name
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
 import json
@@ -15,60 +15,48 @@ import json
 def get_subscription_status():
     """
     Endpoint for the frontend to get the user's full subscription and usage status.
-    Relies on the `handle_new_user` database trigger to provision new users.
+    It fetches the most recent usage record to ensure data is consistent.
     """
     supabase = extensions.supabase
     uid = g.user.id
 
     try:
-        # Step 1: Fetch the user's subscription.
-        sub_response = supabase.table('user_subscriptions').select('*').eq('user_id', uid).execute()
+        # Step 1: Get the user's main subscription record.
+        sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).single().execute()
+        if not sub_res.data:
+            # This should ideally not happen if the user is authenticated.
+            return jsonify({"error": "Subscription profile not found."}), 404
+        subscription = sub_res.data
 
-        if not sub_response.data:
-            current_app.logger.error(f"FATAL: No subscription found for user {uid}, but the DB trigger should have created one.")
-            return jsonify({"error": "Your user profile is not configured correctly. Please contact support."}), 500
-        
-        subscription = sub_response.data[0]
+        # Step 2: Get the plan details for that subscription.
+        plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).single().execute()
+        subscription['subscription_plans'] = plan_res.data if plan_res.data else None
 
-        # Step 2: Fetch the plan details separately.
-        plan_id = subscription.get('plan_id')
-        if plan_id:
-            plan_response = supabase.table('subscription_plans').select('*').eq('id', plan_id).execute()
-            if plan_response.data:
-                subscription['subscription_plans'] = plan_response.data[0]
-            else:
-                current_app.logger.warning(f"Subscription plan with id {plan_id} not found for user {uid}.")
-                subscription['subscription_plans'] = None
-        else:
-            subscription['subscription_plans'] = None
-
-        # Step 3: Fetch the usage for the current period.
-        period_start_str = subscription['current_period_start']
-        period_end_str = subscription['current_period_end']
-
-        usage_response = supabase.table('feature_usage').select('*') \
+        # Step 3: Get the user's most recent usage record. This is the source of truth for usage.
+        usage_res = supabase.table('feature_usage') \
+            .select('*') \
             .eq('user_id', uid) \
-            .eq('period_start', period_start_str) \
-            .eq('period_end', period_end_str) \
+            .order('period_end', desc=True) \
+            .limit(1) \
+            .maybe_single() \
             .execute()
 
-        if usage_response.data:
-            subscription['usage'] = usage_response.data[0]
+        if usage_res.data:
+            subscription['usage'] = usage_res.data
         else:
-            subscription['usage'] = {}
+            # If no usage record has ever been created, return a default zeroed-out object.
+            subscription['usage'] = {
+                'resume_count': 0, 'cover_letter_count': 0, 
+                'linkedin_optimize_count': 0, 'job_search_results_count': 0
+            }
 
+        current_app.logger.info(f"--- FINAL SUBSCRIPTION DATA SENT TO FRONTEND ---")
+        current_app.logger.info(json.dumps(subscription, indent=2, default=str))
         return jsonify(subscription), 200
         
-    except APIError as e:
-        if 'Missing response' in str(e.message):
-            current_app.logger.error(f"DATABASE NETWORK ERROR in /subscription/status for user {uid}: {e}", exc_info=False)
-            return jsonify({"error": "Service temporarily unavailable due to a database connection issue. Please try again later."}), 503
-        else:
-            current_app.logger.error(f"DATABASE API_ERROR in /subscription/status for user {uid}: {e}", exc_info=True)
-            return jsonify({"error": "A database error occurred while fetching your subscription.", "details": str(e.message)}), 500
     except Exception as e:
-        current_app.logger.error(f"An unexpected exception occurred in /subscription/status for user {uid}: {e}", exc_info=True)
-        return jsonify({"error": "An unexpected server error occurred while fetching subscription status."}), 500
+        current_app.logger.error(f"An unexpected error occurred in /subscription/status: {e}", exc_info=True)
+        return jsonify({"error": "An unexpected server error occurred."}), 500
 
 @subscription_bp.route("/customer-portal", methods=["POST", "OPTIONS"])
 @require_authentication

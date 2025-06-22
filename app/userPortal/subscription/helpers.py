@@ -131,112 +131,72 @@ def handle_period_rollover(supabase, uid, subscription):
 
 def check_and_use_feature(feature_name, increment_by=1):
     """
-    Decorator to check quota, handle rollovers, and increment usage *after*
-    the decorated function succeeds.
+    Decorator that checks a user's feature usage against their plan limits.
+    It identifies the current usage period and handles rollovers by creating a new
+    usage record for the new month if necessary.
     """
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             if not hasattr(g, 'user'):
-                current_app.logger.error("g.user not found. @require_authentication must be used before @check_and_use_feature.")
-                return jsonify({"error": "Internal server error: user not authenticated for feature check."}), 500
+                return jsonify({"error": "User not authenticated for feature check."}), 500
 
             try:
                 supabase = extensions.supabase
                 uid = g.user.id
                 display_name = get_user_display_name(g.user)
-                
-                # Step 1 & 2: Get or create the user's subscription record.
-                sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
-                
-                if not sub_res:
-                    current_app.logger.error(f"DB query for subscription for user {uid} returned None. Aborting.")
-                    return jsonify({"error": "A database error occurred. Please try again later."}), 503
-                subscription_record = sub_res.data # Will be a dict if found, None if not.
 
-                # If a subscription exists, handle a potential period rollover before any other checks.
-                # This ensures the user is always associated with the correct billing period.
-                if subscription_record:
-                    handle_period_rollover(supabase, uid, subscription_record)
-                    # After a potential rollover, we refetch the subscription to guarantee we have the latest dates.
-                    sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
-                    if not sub_res:
-                        current_app.logger.error(f"DB query for subscription for user {uid} returned None after rollover. Aborting.")
-                        return jsonify({"error": "A database error occurred. Please try again later."}), 503
-                    subscription_record = sub_res.data
-                    
-                    # After refetching, check and update the display name if it's out of date.
-                    if subscription_record and subscription_record.get('display_name') != display_name:
-                        current_app.logger.info(f"Updating stale display_name for user {uid} in user_subscriptions.")
-                        supabase.table('user_subscriptions').update({'display_name': display_name}).eq('user_id', uid).execute()
-
-                if not subscription_record:
-                    current_app.logger.info(f"User {uid} has no subscription record. Creating default free plan entries.")
-                    period_start = get_first_day_of_month(date.today())
-                    period_end = get_last_day_of_month(date.today())
-
-                    # Create the subscription record, relying on DB defaults for plan_id and status.
-                    new_sub_res = supabase.table('user_subscriptions').insert({
-                        'user_id': uid,
-                        'display_name': display_name,
-                        'current_period_start': str(period_start),
-                        'current_period_end': str(period_end)
-                    }, returning='representation').execute()
-                    
-                    if not new_sub_res or not new_sub_res.data:
-                        current_app.logger.error(f"Failed to create subscription for user {uid}. DB Response: {getattr(new_sub_res, 'data', 'N/A')}")
-                        return jsonify({"error": "Failed to initialize your user profile."}), 500
-                    
-                    subscription_record = new_sub_res.data[0]
-
-                # Now that the subscription record is guaranteed to be up-to-date,
-                # we can fetch or create the usage record for the correct period.
-                plan_id = subscription_record['plan_id']
-                plan_res = supabase.table('subscription_plans').select('*').eq('id', plan_id).single().execute()
+                # Step 1: Get the user's most recent usage record. This is the simplest source of truth.
+                usage_res = supabase.table('feature_usage') \
+                    .select('*') \
+                    .eq('user_id', uid) \
+                    .order('period_end', desc=True) \
+                    .limit(1) \
+                    .maybe_single() \
+                    .execute()
                 
-                if not plan_res or not plan_res.data:
-                    current_app.logger.error(f"Could not fetch plan details for plan_id {plan_id}.")
-                    return jsonify({"error": "Could not verify your subscription plan details."}), 500
+                usage_record = usage_res.data if usage_res else None
                 
-                period_start = subscription_record['current_period_start']
-                period_end = subscription_record['current_period_end']
+                # Step 2: Check if the period is expired or if no record exists.
+                today = date.today()
+                is_expired = usage_record and today > datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
                 
-                usage_res = supabase.table('feature_usage').select('*').eq('user_id', uid).eq('period_start', period_start).eq('period_end', period_end).maybe_single().execute()
-                
-                if not usage_res:
-                    current_app.logger.error(f"DB query for usage record for user {uid} returned None. Aborting.")
-                    return jsonify({"error": "A database error occurred. Please try again later."}), 503
-                usage_record = usage_res.data # Will be a dict if found, None if not.
-                    
-                # If a usage record exists, check if the display name is stale and update it.
-                if usage_record and usage_record.get('display_name') != display_name:
-                    current_app.logger.info(f"Updating stale display_name for user {uid} in feature_usage for period starting {period_start}.")
-                    supabase.table('feature_usage').update({'display_name': display_name}).eq('id', usage_record['id']).execute()
+                if not usage_record or is_expired:
+                    if is_expired:
+                        current_app.logger.info(f"Usage period for user {uid} expired on {usage_record['period_end']}. Creating new record for current month.")
+                    else:
+                        current_app.logger.info(f"No usage record found for user {uid}. Creating one for current month.")
 
-                if not usage_record:
-                    current_app.logger.info(f"No usage record for user {uid} for period {period_start}-{period_end}. Creating one.")
+                    # Create a new record for the current calendar month.
+                    period_start = get_first_day_of_month(today)
+                    period_end = get_last_day_of_month(today)
                     
-                    # Rely on DB defaults for all count fields.
+                    # We need the user's plan_id to create the new usage record.
+                    sub_res = supabase.table('user_subscriptions').select('plan_id').eq('user_id', uid).single().execute()
+                    plan_id = sub_res.data['plan_id'] if sub_res.data else 1 # Default to Free plan
+
                     initial_usage = {
-                        'user_id': uid,
-                        'plan_id': plan_id,
-                        'period_start': period_start,
-                        'period_end': period_end,
-                        'display_name': display_name
+                        'user_id': uid, 'plan_id': plan_id, 'display_name': display_name,
+                        'period_start': str(period_start), 'period_end': str(period_end)
                     }
                     new_usage_res = supabase.table('feature_usage').insert(initial_usage, returning='representation').execute()
                     
-                    if not new_usage_res or not new_usage_res.data:
-                        current_app.logger.error(f"Failed to create feature_usage for user {uid}. DB Response: {getattr(new_usage_res, 'data', 'N/A')}")
+                    if not new_usage_res.data:
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500
                     
                     usage_record = new_usage_res.data[0]
 
-                # Step 5: Compare usage against the plan's limit using the unified usage_record
+                # Step 3: Get plan limits.
+                plan_res = supabase.table('subscription_plans').select('*').eq('id', usage_record['plan_id']).single().execute()
+                if not plan_res.data:
+                    return jsonify({"error": "Could not verify your subscription plan details."}), 500
+                
+                # Step 4: Compare usage against the plan's limit.
                 usage_count_col = f"{feature_name}_count"
                 current_usage = usage_record.get(usage_count_col, 0) or 0
                 
-                plan_limit_col = f"{feature_name}_limit_per_month"
+                # The typo is in your database schema, so we query for the correct column name.
+                plan_limit_col = 'linkedin_optimize_limit' if feature_name == 'linkedin_optimize' else f"{feature_name}_limit_per_month"
                 plan_limit = plan_res.data.get(plan_limit_col, 0) or 0
 
                 if current_usage + increment_by > plan_limit:
@@ -246,34 +206,31 @@ def check_and_use_feature(feature_name, increment_by=1):
                         "usage": current_usage
                     }), 429
                 
-                # --- END OF PRE-CHECK ---
-
-            except APIError as e:
-                # This error handling remains crucial for genuine network issues.
-                if 'Missing response' in str(e.message):
-                    current_app.logger.error(f"DATABASE NETWORK ERROR in check_and_use_feature pre-check: {e}", exc_info=True)
-                    return jsonify({"error": "Service temporarily unavailable due to a database connection issue. Please try again later."}), 503
-                else:
-                    current_app.logger.error(f"DATABASE API_ERROR in check_and_use_feature pre-check: {e}", exc_info=True)
-                    return jsonify({"error": "A database error occurred while verifying your plan.", "details": str(e.message)}), 500
             except Exception as e:
                 current_app.logger.error(f"An unexpected error occurred in check_and_use_feature pre-check: {e}", exc_info=True)
-                return jsonify({"error": "An internal server error occurred while checking feature usage."}), 500
+                return jsonify({"error": "An internal server error occurred."}), 500
 
-            # Step 6: Proceed to execute the original function
+            # --- PRE-CHECK COMPLETE ---
+            
+            # Execute the original function.
             response, status_code = f(*args, **kwargs)
 
-            # Step 7: Only if the function was successful, increment the usage
+            # Only if the function was successful, increment the usage.
             if 200 <= status_code < 300:
                 try:
                     current_app.logger.info(f"Feature '{feature_name}' used successfully. Incrementing usage for user {uid}.")
-                    supabase.table('feature_usage') \
-                        .update({usage_count_col: current_usage + increment_by}) \
-                        .eq('id', usage_record['id']) \
-                        .execute()
+                    
+                    # Use a remote procedure call (RPC) to safely increment the value.
+                    # This prevents race conditions where two requests could overwrite each other's updates.
+                    supabase.rpc('increment_feature_usage', {
+                        'p_user_id': uid,
+                        'p_period_start': usage_record['period_start'],
+                        'p_feature_column': usage_count_col,
+                        'p_increment_by': increment_by
+                    }).execute()
+
                 except APIError as e:
-                    # Log this failure, but don't fail the user's request since they got their response.
-                    current_app.logger.error(f"CRITICAL: Failed to increment usage for user {uid} after a successful API call. Details: {e}", exc_info=True)
+                    current_app.logger.error(f"CRITICAL: Failed to increment usage for user {uid} via RPC. Details: {e}", exc_info=True)
                 
             return response, status_code
         
