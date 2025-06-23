@@ -10,45 +10,81 @@ from postgrest.exceptions import APIError
 from types import SimpleNamespace
 import json
 
+def _create_and_get_usage_record(supabase, uid, plan_id, display_name):
+    """Helper to create a new usage record for the current month."""
+    period_start = get_first_day_of_month(date.today())
+    period_end = get_last_day_of_month(date.today())
+    
+    current_app.logger.info(f"Creating new usage record for user {uid} for period {period_start}-{period_end}.")
+    
+    usage_insert_res = supabase.table('feature_usage').insert({
+        'user_id': uid,
+        'plan_id': plan_id,
+        'period_start': str(period_start),
+        'period_end': str(period_end),
+        'display_name': display_name
+    }, returning='representation').execute()
+
+    # The 'insert' command returns a list, so we safely access the first element.
+    return usage_insert_res.data[0] if (usage_insert_res and usage_insert_res.data) else None
+
 @subscription_bp.route("/status", methods=["GET", "OPTIONS"])
 @require_authentication
 def get_subscription_status():
     """
-    Endpoint for the frontend to get the user's full subscription and usage status.
-    It fetches the most recent usage record to ensure data is consistent.
+    Endpoint for the frontend to get a user's subscription and usage status.
+    It robustly handles creating records for new users or fixing inconsistent data.
     """
     supabase = extensions.supabase
     uid = g.user.id
+    display_name = get_user_display_name(g.user)
 
     try:
-        # Step 1: Get the user's main subscription record.
-        sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).single().execute()
-        if not sub_res.data:
-            # This should ideally not happen if the user is authenticated.
-            return jsonify({"error": "Subscription profile not found."}), 404
-        subscription = sub_res.data
+        # Step 1: Check for the main subscription record.
+        sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
+        subscription = sub_res.data if (sub_res and sub_res.data) else None
 
-        # Step 2: Get the plan details for that subscription.
-        plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).single().execute()
-        subscription['subscription_plans'] = plan_res.data if plan_res.data else None
+        # Step 2: If no subscription exists at all, create everything from scratch.
+        if not subscription:
+            current_app.logger.info(f"No subscription found for user {uid}. Provisioning new records.")
+            period_start = get_first_day_of_month(date.today())
+            period_end = get_last_day_of_month(date.today())
 
-        # Step 3: Get the user's most recent usage record. This is the source of truth for usage.
-        usage_res = supabase.table('feature_usage') \
-            .select('*') \
-            .eq('user_id', uid) \
-            .order('period_end', desc=True) \
-            .limit(1) \
-            .maybe_single() \
-            .execute()
+            # Create the main subscription record (defaults to free plan)
+            sub_insert_res = supabase.table('user_subscriptions').insert({
+                'user_id': uid, 'display_name': display_name,
+                'current_period_start': str(period_start), 'current_period_end': str(period_end)
+            }, returning='representation').execute()
 
-        if usage_res.data:
-            subscription['usage'] = usage_res.data
+            if not (sub_insert_res and sub_insert_res.data):
+                return jsonify({"error": "Failed to initialize your user profile."}), 500
+            
+            subscription = sub_insert_res.data[0]
+            
+            # Now create the corresponding usage record for the new subscription.
+            usage_record = _create_and_get_usage_record(supabase, uid, subscription.get('plan_id', 1), display_name)
+            subscription['usage'] = usage_record
+
+        # Step 3: If a subscription exists, ensure it has a corresponding usage record.
         else:
-            # If no usage record has ever been created, return a default zeroed-out object.
-            subscription['usage'] = {
-                'resume_count': 0, 'cover_letter_count': 0, 
-                'linkedin_optimize_count': 0, 'job_search_results_count': 0
-            }
+            usage_res = supabase.table('feature_usage') \
+                .select('*').eq('user_id', uid).order('period_end', desc=True).limit(1).maybe_single().execute()
+            
+            usage_record = usage_res.data if (usage_res and usage_res.data) else None
+
+            # If no usage record is found for an existing subscription, create one.
+            if not usage_record:
+                usage_record = _create_and_get_usage_record(supabase, uid, subscription.get('plan_id', 1), display_name)
+            
+            subscription['usage'] = usage_record
+            
+        # Step 4: Ensure plan details are attached.
+        plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
+        subscription['subscription_plans'] = plan_res.data if (plan_res and plan_res.data) else None
+
+        # Step 5: As a final safety net, ensure the 'usage' key is never null.
+        if subscription.get('usage') is None:
+            subscription['usage'] = {'resume_count': 0, 'cover_letter_count': 0, 'linkedin_optimize_count': 0, 'job_search_results_count': 0}
 
         current_app.logger.info(f"--- FINAL SUBSCRIPTION DATA SENT TO FRONTEND ---")
         current_app.logger.info(json.dumps(subscription, indent=2, default=str))
