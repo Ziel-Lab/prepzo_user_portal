@@ -307,17 +307,20 @@ def stripe_webhook():
         uid = session.get('client_reference_id')
         customer_id = session.get('customer')
         subscription_id = session.get('subscription')
+        # Extract the user's name provided during checkout and save it to our DB.
+        display_name = session.get('customer_details', {}).get('name')
 
         if not all([uid, customer_id, subscription_id]):
             current_app.logger.error(f"Webhook Error: 'checkout.session.completed' is missing required IDs. Session: {session.get('id')}")
             return jsonify(success=True)
 
         try:
-            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} from session {session.get('id')}. Waiting for payment success to activate.")
+            current_app.logger.info(f"Provisioning Stripe IDs and display name '{display_name}' for user {uid} from session {session.get('id')}. Waiting for payment success to activate.")
             update_payload = {
                 'stripe_customer_id': customer_id,
                 'stripe_subscription_id': subscription_id,
                 'status': 'processing', # Mark as processing until first payment succeeds
+                'display_name': display_name,
                 'updated_at': datetime.utcnow().isoformat()
             }
             supabase.table('user_subscriptions').update(update_payload).eq('user_id', uid).execute()
@@ -339,14 +342,8 @@ def stripe_webhook():
             return jsonify(success=True)
 
         try:
-            # Retrieve the Stripe Subscription to get the most accurate date info
-            stripe_sub = stripe.Subscription.retrieve(subscription_id)
-
-            # Get the price ID from the invoice line item
-            if not invoice.get('lines') or not invoice['lines'].get('data'):
-                 current_app.logger.error(f"Invoice {invoice.get('id')} has no line items. Cannot determine plan.")
-                 return jsonify(success=True)
-
+            # The invoice object from the webhook has all the info we need.
+            # No need for an extra API call to Stripe.
             price_id = invoice['lines']['data'][0]['price']['id']
 
             # Per user request, hardcode the plan_id to 2 for any successful payment.
@@ -355,8 +352,8 @@ def stripe_webhook():
             current_app.logger.info(f"Activating '{plan_name}' plan (ID: {plan_id}) for customer {customer_id}.")
             
             # Prepare the update payload for our database
-            period_start = datetime.fromtimestamp(stripe_sub.current_period_start, tz=timezone.utc)
-            period_end = datetime.fromtimestamp(stripe_sub.current_period_end, tz=timezone.utc)
+            period_start = datetime.fromtimestamp(invoice.period_start, tz=timezone.utc)
+            period_end = datetime.fromtimestamp(invoice.period_end, tz=timezone.utc)
             
             update_payload = {
                 'plan_id': plan_id,
@@ -364,15 +361,15 @@ def stripe_webhook():
                 'stripe_price_id': price_id,
                 'current_period_start': str(period_start.date()),
                 'current_period_end': str(period_end.date()),
-                'next_billing_date': str(datetime.fromtimestamp(stripe_sub.current_period_end, tz=timezone.utc).date()),
+                'next_billing_date': str(period_end.date()),
                 'updated_at': datetime.utcnow().isoformat()
             }
 
             # Update the user's subscription record
-            sub_update_res = supabase.table('user_subscriptions').update(update_payload).eq('stripe_subscription_id', subscription_id).execute()
+            supabase.table('user_subscriptions').update(update_payload).eq('stripe_subscription_id', subscription_id).execute()
             
             # Also create a new usage record for the new billing period
-            # First, get the user_id and display_name from the updated subscription
+            # First, get the user_id and display_name from the subscription record
             user_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
             if user_res.data:
                 uid = user_res.data['user_id']
