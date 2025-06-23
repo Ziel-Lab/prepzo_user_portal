@@ -331,9 +331,11 @@ def stripe_webhook():
         invoice = data
         customer_id = invoice.get('customer')
         subscription_id = invoice.get('subscription')
+        billing_reason = invoice.get('billing_reason')
         
-        if not customer_id or not subscription_id or invoice.get('billing_reason') != 'subscription_cycle':
-            # This handles one-off payments or setup fees. We only care about recurring subscription payments.
+        # This webhook can fire for one-off payments. We only care about activating/renewing subscriptions.
+        if not customer_id or not subscription_id or billing_reason not in ['subscription_cycle', 'subscription_create']:
+            current_app.logger.info(f"Ignoring 'invoice.payment_succeeded' for non-subscription event. Reason: {billing_reason}")
             return jsonify(success=True)
 
         try:
