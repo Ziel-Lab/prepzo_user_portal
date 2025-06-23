@@ -307,14 +307,16 @@ def stripe_webhook():
         uid = session.get('client_reference_id')
         customer_id = session.get('customer')
         subscription_id = session.get('subscription')
-        # Extract the user's name provided during checkout and save it to our DB.
-        display_name = session.get('customer_details', {}).get('name')
 
         if not all([uid, customer_id, subscription_id]):
             current_app.logger.error(f"Webhook Error: 'checkout.session.completed' is missing required IDs. Session: {session.get('id')}")
             return jsonify(success=True)
 
         try:
+            # Fetch the user from Supabase auth to get their display name, as requested.
+            user_res = supabase.auth.admin.get_user_by_id(uid)
+            display_name = get_user_display_name(user_res.user)
+
             current_app.logger.info(f"Provisioning Stripe IDs and display name '{display_name}' for user {uid} from session {session.get('id')}. Waiting for payment success to activate.")
             update_payload = {
                 'stripe_customer_id': customer_id,
