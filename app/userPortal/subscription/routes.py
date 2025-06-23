@@ -314,11 +314,13 @@ def stripe_webhook():
 
         try:
             current_app.logger.info(f"Provisioning Stripe IDs for user {uid} from session {session.get('id')}. Waiting for payment success to activate.")
-            supabase.rpc('provision_stripe_ids', {
-                'p_user_id': uid,
-                'p_stripe_customer_id': customer_id,
-                'p_stripe_subscription_id': subscription_id,
-            }).execute()
+            update_payload = {
+                'stripe_customer_id': customer_id,
+                'stripe_subscription_id': subscription_id,
+                'status': 'processing', # Mark as processing until first payment succeeds
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            supabase.table('user_subscriptions').update(update_payload).eq('user_id', uid).execute()
             current_app.logger.info(f"Successfully provisioned Stripe IDs for user {uid}")
         except Exception as e:
             error_message = f"Webhook processing failed for '{event_type}'. User: {uid}. Error: {e}"
@@ -330,23 +332,52 @@ def stripe_webhook():
         customer_id = invoice.get('customer')
         subscription_id = invoice.get('subscription')
         
-        if not customer_id or not subscription_id:
-            # Not a subscription invoice, ignore.
+        if not customer_id or not subscription_id or invoice.get('billing_reason') != 'subscription_cycle':
+            # This handles one-off payments or setup fees. We only care about recurring subscription payments.
             return jsonify(success=True)
 
         try:
-            # The invoice object itself contains the exact billing period that was just paid for.
-            period_start = str(datetime.fromtimestamp(invoice.period_start, tz=timezone.utc).date())
-            paid_plan_id = 2 # The ID for your "Pro" plan
+            # Retrieve the Stripe Subscription to get the most accurate date info
+            stripe_sub = stripe.Subscription.retrieve(subscription_id)
 
-            current_app.logger.info(f"Activating subscription {subscription_id} for customer {customer_id} via invoice {invoice.get('id')}.")
+            # Get the price ID from the invoice line item
+            if not invoice.get('lines') or not invoice['lines'].get('data'):
+                 current_app.logger.error(f"Invoice {invoice.get('id')} has no line items. Cannot determine plan.")
+                 return jsonify(success=True)
+
+            price_id = invoice['lines']['data'][0]['price']['id']
+
+            # Per user request, hardcode the plan_id to 2 for any successful payment.
+            plan_id = 2
+            plan_name = "Pro" # Assuming plan 2 is the paid plan
+            current_app.logger.info(f"Activating '{plan_name}' plan (ID: {plan_id}) for customer {customer_id}.")
             
-            supabase.rpc('activate_subscription_from_invoice', {
-                'p_stripe_customer_id': customer_id,
-                'p_stripe_subscription_id': subscription_id,
-                'p_plan_id': paid_plan_id,
-                'p_period_start': period_start
-            }).execute()
+            # Prepare the update payload for our database
+            period_start = datetime.fromtimestamp(stripe_sub.current_period_start, tz=timezone.utc)
+            period_end = datetime.fromtimestamp(stripe_sub.current_period_end, tz=timezone.utc)
+            
+            update_payload = {
+                'plan_id': plan_id,
+                'status': 'active',
+                'stripe_price_id': price_id,
+                'current_period_start': str(period_start.date()),
+                'current_period_end': str(period_end.date()),
+                'next_billing_date': str(datetime.fromtimestamp(stripe_sub.current_period_end, tz=timezone.utc).date()),
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            # Update the user's subscription record
+            sub_update_res = supabase.table('user_subscriptions').update(update_payload).eq('stripe_subscription_id', subscription_id).execute()
+            
+            # Also create a new usage record for the new billing period
+            # First, get the user_id and display_name from the updated subscription
+            user_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
+            if user_res.data:
+                uid = user_res.data['user_id']
+                display_name = user_res.data['display_name']
+                _create_and_get_usage_record(supabase, uid, plan_id, display_name)
+                current_app.logger.info(f"Successfully created new usage record for user {uid} for plan '{plan_name}'.")
+
             current_app.logger.info(f"Successfully activated subscription for customer {customer_id}")
 
         except Exception as e:
