@@ -357,9 +357,12 @@ def stripe_webhook():
             period_start = datetime.fromtimestamp(invoice.period_start, tz=timezone.utc)
             period_end = datetime.fromtimestamp(invoice.period_end, tz=timezone.utc)
             
+            # The subscription_id from the invoice might be new if the payment_succeeded event
+            # arrives before checkout_completed. We'll update based on customer_id, which should be stable.
             update_payload = {
                 'plan_id': plan_id,
                 'status': 'active',
+                'stripe_subscription_id': subscription_id, # Ensure this is updated
                 'stripe_price_id': price_id,
                 'current_period_start': str(period_start.date()),
                 'current_period_end': str(period_end.date()),
@@ -367,12 +370,11 @@ def stripe_webhook():
                 'updated_at': datetime.utcnow().isoformat()
             }
 
-            # Update the user's subscription record
-            supabase.table('user_subscriptions').update(update_payload).eq('stripe_subscription_id', subscription_id).execute()
+            # Update the user's subscription record using the CUSTOMER ID as the key
+            supabase.table('user_subscriptions').update(update_payload).eq('stripe_customer_id', customer_id).execute()
             
-            # Also create a new usage record for the new billing period
-            # First, get the user_id and display_name from the subscription record
-            user_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
+            # Now fetch the user details using the same customer ID to create the usage record
+            user_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_customer_id', customer_id).single().execute()
             if user_res.data:
                 uid = user_res.data['user_id']
                 display_name = user_res.data['display_name']
