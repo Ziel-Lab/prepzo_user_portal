@@ -191,7 +191,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                 if not plan_res.data:
                     return jsonify({"error": "Could not verify your subscription plan details."}), 500
                 
-                # Step 4: Compare usage against the plan's limit.
+
                 usage_count_col = f"{feature_name}_count"
                 current_usage = usage_record.get(usage_count_col, 0) or 0
                 
