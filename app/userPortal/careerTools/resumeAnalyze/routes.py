@@ -127,6 +127,10 @@ def roast_resume():
             if file_to_upload.filename == "":
                 return jsonify({"error": "No selected file for upload"}), 400
 
+            document_type = request.form.get("document_type")
+            if not document_type:
+                return jsonify({"error": "Missing required document_type field"}), 400
+
             file_bytes = file_to_upload.read()
             file_to_upload.seek(0)
 
@@ -153,7 +157,7 @@ def roast_resume():
             document_data = {
                 "uid": current_user_id, 
                 "document_name": file_to_upload.filename,
-                "document_type": flask_mimetype, 
+                "document_type": document_type, 
                 "document_url": resume_url_for_xano,
                 "display_name": user_name,
                 "document_comments": "Uploaded for resume roast"

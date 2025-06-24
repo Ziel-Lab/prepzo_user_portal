@@ -45,6 +45,10 @@ def upload_document():
     if file.filename == "":
         return jsonify({"error": "No selected file"}), 400
 
+    document_type = request.form.get("document_type")
+    if not document_type:
+        return jsonify({"error": "Missing required document_type field"}), 400
+
     file_bytes = file.read()
   
     flask_mimetype = file.mimetype
@@ -80,7 +84,7 @@ def upload_document():
         document_data = {
             "uid": current_user_id,
             "document_name": file.filename,  # Store original filename for display
-            "document_type": flask_mimetype,
+            "document_type": document_type,
             "document_url": public_url,
             "display_name": user_display_name,
             "document_comments": document_comments
