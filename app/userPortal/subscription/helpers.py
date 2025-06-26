@@ -5,6 +5,7 @@ from functools import wraps
 import calendar
 from postgrest.exceptions import APIError
 from gotrue.errors import AuthApiError
+from dateutil.relativedelta import relativedelta
 
 
 class QuotaExceededError(Exception):
@@ -72,12 +73,6 @@ def require_authentication(f):
             
     return decorated_function
 
-def get_first_day_of_month(dt):
-    return dt.replace(day=1)
-
-def get_last_day_of_month(dt):
-    return dt.replace(day=calendar.monthrange(dt.year, dt.month)[1])
-
 def get_user_display_name(user):
     """Safely retrieves the display name from a user object."""
     if not user or not hasattr(user, 'user_metadata') or not user.user_metadata:
@@ -85,13 +80,41 @@ def get_user_display_name(user):
     # Prioritize 'full_name', then 'name', and finally 'N/A'
     return user.user_metadata.get('full_name') or user.user_metadata.get('name') or 'N/A'
 
-def get_next_period(current_period_end):
-    """Calculates the start and end of the next billing period."""
-    # Start of the next month
-    next_period_start = get_first_day_of_month(current_period_end + timedelta(days=1))
-    # End of that next month
-    next_period_end = get_last_day_of_month(next_period_start)
-    return next_period_start, next_period_end
+def get_anniversary_period(created_at_str, today):
+    """
+    Calculates the current subscription period based on the user's signup anniversary.
+    Handles edge cases like signing up on the 31st for shorter months.
+    """
+    try:
+        # Supabase provides created_at as an ISO 8601 string with timezone
+        created_at_date = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        # Fallback for unexpected format, default to 1st of month.
+        current_app.logger.warning(f"Could not parse user created_at string: '{created_at_str}'. Falling back to calendar month period.")
+        return today.replace(day=1), (today.replace(day=1) + relativedelta(months=1) - relativedelta(days=1))
+
+    anniversary_day = created_at_date.day
+
+    # Determine the year and month of the period's start date
+    if today.day >= anniversary_day:
+        # The period started this month
+        start_date_base = today
+    else:
+        # The period started last month
+        start_date_base = today - relativedelta(months=1)
+
+    # Safely create the start date, clamping to the last day of the month if needed
+    try:
+        period_start = date(start_date_base.year, start_date_base.month, anniversary_day)
+    except ValueError:
+        # This handles cases where anniversary_day is invalid for the month (e.g., 31 in Feb).
+        # We clamp to the last day of that month.
+        last_day_of_month = (date(start_date_base.year, start_date_base.month, 1) + relativedelta(months=1) - relativedelta(days=1)).day
+        period_start = date(start_date_base.year, start_date_base.month, last_day_of_month)
+
+    period_end = period_start + relativedelta(months=1) - relativedelta(days=1)
+    
+    return period_start, period_end
 
 def handle_period_rollover(supabase, uid, subscription):
     """
@@ -113,7 +136,7 @@ def handle_period_rollover(supabase, uid, subscription):
     if today > current_period_end:
         current_app.logger.info(f"User {uid} billing period expired on {current_period_end}. Rolling over subscription dates.")
         
-        next_period_start, next_period_end = get_next_period(current_period_end)
+        next_period_start, next_period_end = get_anniversary_period(g.user.created_at, today)
         
         # Update user_subscriptions with the new period
         updated_sub_res = supabase.table('user_subscriptions') \
@@ -134,6 +157,8 @@ def check_and_use_feature(feature_name, increment_by=1):
     Decorator that checks a user's feature usage against their plan limits.
     It identifies the current usage period and handles rollovers by creating a new
     usage record for the new month if necessary.
+    This decorator is robust against mid-cycle plan changes by always using the
+    user's current subscription as the source of truth for limits.
     """
     def decorator(f):
         @wraps(f)
@@ -146,7 +171,17 @@ def check_and_use_feature(feature_name, increment_by=1):
                 uid = g.user.id
                 display_name = get_user_display_name(g.user)
 
-                # Step 1: Get the user's most recent usage record. This is the simplest source of truth.
+                # Step 1: Get the user's current subscription plan. This is the source of truth.
+                sub_res = supabase.table('user_subscriptions').select('plan_id').eq('user_id', uid).single().execute()
+                current_plan_id = sub_res.data['plan_id'] if sub_res.data else 1  # Default to Free plan
+
+                # Step 2: Get the limits for the user's CURRENT plan.
+                plan_res = supabase.table('subscription_plans').select('*').eq('id', current_plan_id).single().execute()
+                if not plan_res.data:
+                    return jsonify({"error": "Could not verify your current subscription plan details."}), 500
+                current_plan_limits = plan_res.data
+
+                # Step 3: Get the user's most recent usage record to check counts.
                 usage_res = supabase.table('feature_usage') \
                     .select('*') \
                     .eq('user_id', uid) \
@@ -157,46 +192,44 @@ def check_and_use_feature(feature_name, increment_by=1):
                 
                 usage_record = usage_res.data if usage_res else None
                 
-                # Step 2: Check if the period is expired or if no record exists.
+                # Step 4: Check if the period is expired or if no record exists.
                 today = date.today()
                 is_expired = usage_record and today > datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
                 
                 if not usage_record or is_expired:
                     if is_expired:
-                        current_app.logger.info(f"Usage period for user {uid} expired on {usage_record['period_end']}. Creating new record for current month.")
+                        current_app.logger.info(f"Usage period for user {uid} expired on {usage_record['period_end']}. Creating new record with current plan {current_plan_id}.")
                     else:
-                        current_app.logger.info(f"No usage record found for user {uid}. Creating one for current month.")
+                        current_app.logger.info(f"No usage record for user {uid}. Creating one with current plan {current_plan_id}.")
 
-                    # Create a new record for the current calendar month.
-                    period_start = get_first_day_of_month(today)
-                    period_end = get_last_day_of_month(today)
+                    period_start, period_end = get_anniversary_period(g.user.created_at, today)
                     
-                    # We need the user's plan_id to create the new usage record.
-                    sub_res = supabase.table('user_subscriptions').select('plan_id').eq('user_id', uid).single().execute()
-                    plan_id = sub_res.data['plan_id'] if sub_res.data else 1 # Default to Free plan
-
                     initial_usage = {
-                        'user_id': uid, 'plan_id': plan_id, 'display_name': display_name,
+                        'user_id': uid, 'plan_id': current_plan_id, 'display_name': display_name,
                         'period_start': str(period_start), 'period_end': str(period_end)
                     }
                     new_usage_res = supabase.table('feature_usage').insert(initial_usage, returning='representation').execute()
                     
                     if not new_usage_res.data:
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500
-                    
                     usage_record = new_usage_res.data[0]
 
-                # Step 3: Get plan limits.
-                plan_res = supabase.table('subscription_plans').select('*').eq('id', usage_record['plan_id']).single().execute()
-                if not plan_res.data:
-                    return jsonify({"error": "Could not verify your subscription plan details."}), 500
-                
+                # Step 5: Handle mid-cycle plan changes.
+                elif usage_record.get('plan_id') != current_plan_id:
+                    current_app.logger.info(f"User {uid} plan changed mid-cycle from {usage_record.get('plan_id')} to {current_plan_id}. Updating usage record.")
+                    supabase.table('feature_usage') \
+                        .update({'plan_id': current_plan_id}) \
+                        .eq('user_id', uid) \
+                        .eq('period_start', usage_record['period_start']) \
+                        .execute()
+                    usage_record['plan_id'] = current_plan_id # Update local copy for immediate use
 
+                # Step 6: Perform the limit check against the CURRENT plan's limits.
                 usage_count_col = f"{feature_name}_count"
                 current_usage = usage_record.get(usage_count_col, 0) or 0
                 
                 plan_limit_col = 'linkedin_optimize_limit' if feature_name == 'linkedin_optimize' else f"{feature_name}_limit_per_month"
-                plan_limit = plan_res.data.get(plan_limit_col, 0) or 0
+                plan_limit = current_plan_limits.get(plan_limit_col, 0) or 0
 
                 if current_usage + increment_by > plan_limit:
                     return jsonify({
