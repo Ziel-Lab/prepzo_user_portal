@@ -16,7 +16,7 @@ def get_linkedin_optimizer_history():
 
     try:
         query_response = (
-            extensions.supabase.table("linkedIn_optimizer")
+            extensions.supabase.table("linkedin_optimizer")
             .select("*")
             .eq("uid", current_user_id)
             .order('created_at', desc=True)
@@ -80,7 +80,7 @@ def create_linkedin_optimization():
             "api_response": api_data 
         }
         
-        result = extensions.supabase.table("linkedIn_optimizer").insert(insert_data).execute()
+        result = extensions.supabase.table("linkedin_optimizer").insert(insert_data).execute()
 
         if not result.data and not (hasattr(result, 'status_code') and 200 <= result.status_code < 300) : # Check for successful insert, some clients might not return data on success
              print(f"Supabase insert failed or returned no data. Result: {result}")
