@@ -208,6 +208,15 @@ def check_and_use_feature(feature_name, increment_by=1):
                         'user_id': uid, 'plan_id': current_plan_id, 'display_name': display_name,
                         'period_start': str(period_start), 'period_end': str(period_end)
                     }
+
+                    # On rollover, dynamically carry over lifetime counts and reset period counts.
+                    if is_expired and usage_record:
+                        for key, value in usage_record.items():
+                            if key.endswith('_lifetime_count'):
+                                initial_usage[key] = value or 0 # Carry over lifetime value
+                                period_col = key.replace('_lifetime_count', '_period_count')
+                                initial_usage[period_col] = 0 # Reset period count
+
                     new_usage_res = supabase.table('feature_usage').insert(initial_usage, returning='representation').execute()
                     
                     if not new_usage_res.data:
@@ -225,7 +234,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                     usage_record['plan_id'] = current_plan_id # Update local copy for immediate use
 
                 # Step 6: Perform the limit check against the CURRENT plan's limits.
-                usage_count_col = f"{feature_name}_count"
+                usage_count_col = f"{feature_name}_period_count"
                 current_usage = usage_record.get(usage_count_col, 0) or 0
                 
                 plan_limit_col = f"{feature_name}_limit_per_month"
@@ -254,10 +263,10 @@ def check_and_use_feature(feature_name, increment_by=1):
                     
                     # Use a remote procedure call (RPC) to safely increment the value.
                     # This prevents race conditions where two requests could overwrite each other's updates.
-                    supabase.rpc('increment_feature_usage', {
+                    supabase.rpc('increment_feature_counters', {
                         'p_user_id': uid,
                         'p_period_start': usage_record['period_start'],
-                        'p_feature_column': usage_count_col,
+                        'p_feature_base_name': feature_name,
                         'p_increment_by': increment_by
                     }).execute()
 

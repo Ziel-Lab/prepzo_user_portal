@@ -5,28 +5,10 @@ import stripe
 from dateutil.relativedelta import relativedelta
 from . import subscription_bp
 from app import extensions
-from .helpers import check_and_use_feature, get_last_day_of_month, require_authentication, get_first_day_of_month, get_user_display_name
+from .helpers import get_anniversary_period, require_authentication, get_user_display_name
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
 import json
-
-def _create_and_get_usage_record(supabase, uid, plan_id, display_name):
-    """Helper to create a new usage record for the current month."""
-    period_start = get_first_day_of_month(date.today())
-    period_end = get_last_day_of_month(date.today())
-    
-    current_app.logger.info(f"Creating new usage record for user {uid} for period {period_start}-{period_end}.")
-    
-    usage_insert_res = supabase.table('feature_usage').insert({
-        'user_id': uid,
-        'plan_id': plan_id,
-        'period_start': str(period_start),
-        'period_end': str(period_end),
-        'display_name': display_name
-    }, returning='representation').execute()
-
-    # The 'insert' command returns a list, so we safely access the first element.
-    return usage_insert_res.data[0] if (usage_insert_res and usage_insert_res.data) else None
 
 @subscription_bp.route("/status", methods=["GET", "OPTIONS"])
 @require_authentication
@@ -44,11 +26,10 @@ def get_subscription_status():
         sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
         subscription = sub_res.data if (sub_res and sub_res.data) else None
 
-        # Step 2: If no subscription exists at all, create everything from scratch.
+        # Step 2: If no subscription exists at all, create everything from scratch using an anniversary period.
         if not subscription:
             current_app.logger.info(f"No subscription found for user {uid}. Provisioning new records.")
-            period_start = get_first_day_of_month(date.today())
-            period_end = get_last_day_of_month(date.today())
+            period_start, period_end = get_anniversary_period(g.user.created_at, date.today())
 
             # Create the main subscription record (defaults to free plan)
             sub_insert_res = supabase.table('user_subscriptions').insert({
@@ -60,23 +41,12 @@ def get_subscription_status():
                 return jsonify({"error": "Failed to initialize your user profile."}), 500
             
             subscription = sub_insert_res.data[0]
-            
-            # Now create the corresponding usage record for the new subscription.
-            usage_record = _create_and_get_usage_record(supabase, uid, subscription.get('plan_id', 1), display_name)
-            subscription['usage'] = usage_record
-
-        # Step 3: If a subscription exists, ensure it has a corresponding usage record.
-        else:
-            usage_res = supabase.table('feature_usage') \
-                .select('*').eq('user_id', uid).order('period_end', desc=True).limit(1).maybe_single().execute()
-            
-            usage_record = usage_res.data if (usage_res and usage_res.data) else None
-
-            # If no usage record is found for an existing subscription, create one.
-            if not usage_record:
-                usage_record = _create_and_get_usage_record(supabase, uid, subscription.get('plan_id', 1), display_name)
-            
-            subscription['usage'] = usage_record
+        
+        # Step 3: Fetch the most recent usage record. check_and_use_feature will create one if needed.
+        usage_res = supabase.table('feature_usage') \
+            .select('*').eq('user_id', uid).order('period_end', desc=True).limit(1).maybe_single().execute()
+        
+        subscription['usage'] = usage_res.data if (usage_res and usage_res.data) else {}
             
         # Step 4: Ensure plan details are attached.
         plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
@@ -84,7 +54,7 @@ def get_subscription_status():
 
         # Step 5: As a final safety net, ensure the 'usage' key is never null.
         if subscription.get('usage') is None:
-            subscription['usage'] = {'resume_count': 0, 'cover_letter_count': 0, 'linkedin_optimize_count': 0, 'job_search_results_count': 0}
+            subscription['usage'] = {}
 
         current_app.logger.info(f"--- FINAL SUBSCRIPTION DATA SENT TO FRONTEND ---")
         current_app.logger.info(json.dumps(subscription, indent=2, default=str))
@@ -313,16 +283,16 @@ def stripe_webhook():
             return jsonify(success=True)
 
         try:
-            # Fetch the user from Supabase auth to get their display name, as requested.
+            # Fetch the fresh user object to get their latest display name.
             user_res = supabase.auth.admin.get_user_by_id(uid)
-            display_name = get_user_display_name(user_res.user)
+            display_name = get_user_display_name(user_res.user) if user_res.user else "User"
 
-            current_app.logger.info(f"Provisioning Stripe IDs and display name '{display_name}' for user {uid} from session {session.get('id')}. Waiting for payment success to activate.")
+            current_app.logger.info(f"Provisioning Stripe IDs for user {uid} (name: '{display_name}') from session {session.get('id')}. Waiting for payment success to activate.")
             update_payload = {
                 'stripe_customer_id': customer_id,
                 'stripe_subscription_id': subscription_id,
                 'status': 'processing', # Mark as processing until first payment succeeds
-                'display_name': display_name,
+                'display_name': display_name, # Update with the fresh name
                 'updated_at': datetime.utcnow().isoformat()
             }
             supabase.table('user_subscriptions').update(update_payload).eq('user_id', uid).execute()
@@ -344,44 +314,47 @@ def stripe_webhook():
             return jsonify(success=True)
 
         try:
-            # The invoice object from the webhook has all the info we need.
-            # No need for an extra API call to Stripe.
-            price_id = invoice['lines']['data'][0]['price']['id']
+            # First, find our internal user ID from the Stripe customer ID
+            sub_res = supabase.table('user_subscriptions').select('user_id').eq('stripe_customer_id', customer_id).single().execute()
+            if not sub_res.data:
+                current_app.logger.error(f"Webhook Error: Could not find user for stripe_customer_id: {customer_id}")
+                return jsonify(success=True) # Acknowledge the webhook
+            uid = sub_res.data['user_id']
+            
+            # Now, fetch the fresh user object to get their latest name and creation date
+            user_res = supabase.auth.admin.get_user_by_id(uid)
+            if not user_res.user:
+                current_app.logger.error(f"Webhook Error: Could not fetch user object for uid: {uid}")
+                return jsonify(success=True)
+            
+            display_name = get_user_display_name(user_res.user)
+            user_created_at = user_res.user.created_at
 
-            # Per user request, hardcode the plan_id to 2 for any successful payment.
-            plan_id = 2
-            plan_name = "Pro" # Assuming plan 2 is the paid plan
-            current_app.logger.info(f"Activating '{plan_name}' plan (ID: {plan_id}) for customer {customer_id}.")
+            # The invoice object from the webhook has all the info we need for dates and price.
+            price_id = invoice['lines']['data'][0]['price']['id']
+            plan_id = 2 # Hardcoded to Pro plan on any successful payment
             
-            # Prepare the update payload for our database
-            period_start = datetime.fromtimestamp(invoice.period_start, tz=timezone.utc)
-            period_end = datetime.fromtimestamp(invoice.period_end, tz=timezone.utc)
+            period_start = datetime.fromtimestamp(invoice.period_start, tz=timezone.utc).date()
+            period_end = datetime.fromtimestamp(invoice.period_end, tz=timezone.utc).date()
             
-            # The subscription_id from the invoice might be new if the payment_succeeded event
-            # arrives before checkout_completed. We'll update based on customer_id, which should be stable.
             update_payload = {
                 'plan_id': plan_id,
                 'status': 'active',
-                'stripe_subscription_id': subscription_id, # Ensure this is updated
+                'display_name': display_name, # Update with the fresh name
+                'stripe_subscription_id': subscription_id,
                 'stripe_price_id': price_id,
-                'current_period_start': str(period_start.date()),
-                'current_period_end': str(period_end.date()),
-                'next_billing_date': str(period_end.date()),
+                'current_period_start': str(period_start),
+                'current_period_end': str(period_end),
+                'next_billing_date': str(period_end),
                 'updated_at': datetime.utcnow().isoformat()
             }
 
             # Update the user's subscription record using the CUSTOMER ID as the key
             supabase.table('user_subscriptions').update(update_payload).eq('stripe_customer_id', customer_id).execute()
             
-            # Now fetch the user details using the same customer ID to create the usage record
-            user_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_customer_id', customer_id).single().execute()
-            if user_res.data:
-                uid = user_res.data['user_id']
-                display_name = user_res.data['display_name']
-                _create_and_get_usage_record(supabase, uid, plan_id, display_name)
-                current_app.logger.info(f"Successfully created new usage record for user {uid} for plan '{plan_name}'.")
-
-            current_app.logger.info(f"Successfully activated subscription for customer {customer_id}")
+            # The check_and_use_feature decorator will automatically handle creating a new usage record
+            # for the new period on the user's next action. This simplifies the webhook's job.
+            current_app.logger.info(f"Successfully activated/renewed subscription for user {uid} (customer: {customer_id})")
 
         except Exception as e:
             error_message = f"Webhook processing failed for '{event_type}'. Customer: {customer_id}. Error: {e}"
@@ -398,13 +371,22 @@ def stripe_webhook():
         customer_id = subscription.get('customer')
         
         if customer_id:
-            sub_res = supabase.table('user_subscriptions').select('id, user_id').eq('stripe_customer_id', customer_id).maybe_single().execute()
+            # Fetch the user_id first to get the created_at timestamp
+            user_res = supabase.table('user_subscriptions').select('id, user_id').eq('stripe_customer_id', customer_id).maybe_single().execute()
 
-            if sub_res.data:
-                sub_id = sub_res.data['id']
-                uid = sub_res.data['user_id']
-                period_start = date.today().replace(day=1)
-                period_end = get_last_day_of_month(date.today())
+            if user_res.data:
+                sub_id = user_res.data['id']
+                uid = user_res.data['user_id']
+                
+                # Get the user object for the creation date to calculate the new anniversary period
+                auth_user_res = supabase.auth.admin.get_user_by_id(uid)
+                if not auth_user_res.user:
+                    current_app.logger.error(f"Webhook Error: Could not fetch user object for uid: {uid} during subscription deletion.")
+                    # Fallback to calendar month if auth user can't be fetched
+                    period_start = date.today().replace(day=1)
+                    period_end = period_start + relativedelta(months=1) - relativedelta(days=1)
+                else:
+                    period_start, period_end = get_anniversary_period(auth_user_res.user.created_at, date.today())
                 
                 # Downgrade user to the free plan (id=1) and set status to 'free'
                 current_app.logger.info(f"Subscription deleted for user {uid}. Downgrading to free plan.")
