@@ -228,7 +228,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                 usage_count_col = f"{feature_name}_count"
                 current_usage = usage_record.get(usage_count_col, 0) or 0
                 
-                plan_limit_col = 'linkedin_optimize_limit' if feature_name == 'linkedin_optimize' else f"{feature_name}_limit_per_month"
+                plan_limit_col = f"{feature_name}_limit_per_month"
                 plan_limit = current_plan_limits.get(plan_limit_col, 0) or 0
 
                 if current_usage + increment_by > plan_limit:
