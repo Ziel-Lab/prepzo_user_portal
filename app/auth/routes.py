@@ -1,5 +1,5 @@
 from flask import jsonify, g, current_app
-from app.userPortal.subscription.helpers import require_authentication, get_last_day_of_month
+from app.userPortal.subscription.helpers import require_authentication
 from . import auth_bp
 from app import extensions
 from datetime import date
