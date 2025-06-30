@@ -22,7 +22,7 @@ def require_authentication(f):
         # Manually handle CORS preflight requests.
         # This is necessary because this decorator runs before the main Flask-CORS extension.
         if request.method == 'OPTIONS':
-            response = make_response()
+            response = make_response(jsonify(success=True))
             
             # The browser needs to know which origin is allowed to make the request.
             # We reflect the request's Origin header, which is standard and secure practice.
@@ -30,12 +30,17 @@ def require_authentication(f):
             origin = request.headers.get('Origin')
             if origin:
                 response.headers.add('Access-Control-Allow-Origin', origin)
-            
+            else:
+                 # For cases where the origin is not sent (e.g. server-to-server, older browsers)
+                 # We can allow all origins for OPTIONS as it's a non-destructive request.
+                 # The actual request will still be validated.
+                 response.headers.add('Access-Control-Allow-Origin', '*')
+
             # Specify what headers and methods are allowed in the actual request.
             response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
             response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
             response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response, 200
+            return response, 204
 
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
