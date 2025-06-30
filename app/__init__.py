@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
 import sys
+from dotenv import load_dotenv
 from .main import main_bp
 from .userPortal.documents import upload_bp
 from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
@@ -15,6 +16,7 @@ import re
 from .userPortal.applications.jobListing import job_listing_bp
 
 def create_app():
+    load_dotenv()
     app = Flask(__name__)
 
     secret_name = "userPortal"
@@ -88,12 +90,13 @@ def create_app():
         # The custom @app.after_request handles CORS headers now, so we can remove the log here.
         return response
 
+    app.register_blueprint(auth_bp)
     app.register_blueprint(main_bp)
+    app.register_blueprint(subscription_bp)
     app.register_blueprint(upload_bp)
     app.register_blueprint(resume_analyze_bp)
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
-    app.register_blueprint(subscription_bp)
-    app.register_blueprint(auth_bp)
     app.register_blueprint(job_listing_bp)
+
     return app
