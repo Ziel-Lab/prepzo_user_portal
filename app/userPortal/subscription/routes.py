@@ -662,12 +662,25 @@ def create_checkout_session():
     the user to Stripe, making our database the source of truth from the start.
     """
     data = request.get_json()
-    price_id = data.get('priceId')
     plan_id = data.get('planId')
     user_id = g.user.id
     
-    if not all([price_id, plan_id, user_id]):
-        return jsonify(error={'message': 'Missing required parameters: priceId, planId, or user_id.'}), 400
+    if not plan_id or not user_id:
+        return jsonify(error={'message': 'Missing required parameters: planId or user_id.'}), 400
+
+    # Look up the Stripe Price ID from the server's configuration based on the internal plan_id.
+    # This is more secure and reliable than expecting the frontend to provide it.
+    # Plan ID 2 = Pro (STRIPE_PAID_PLAN_PRICE_ID_1)
+    # Plan ID 3 = Premium (STRIPE_PAID_PLAN_PRICE_ID_2)
+    price_id = None
+    if plan_id == 2:
+        price_id = current_app.config.get("STRIPE_PAID_PLAN_PRICE_ID_1")
+    elif plan_id == 3:
+        price_id = current_app.config.get("STRIPE_PAID_PLAN_PRICE_ID_2")
+
+    if not price_id:
+        current_app.logger.error(f"Could not find a Stripe Price ID for plan_id {plan_id}. Check server environment variables STRIPE_PAID_PLAN_PRICE_ID_1 and STRIPE_PAID_PLAN_PRICE_ID_2.")
+        return jsonify(error={'message': f'The payment link for the selected plan is not configured. Please contact support.'}), 500
 
     supabase = extensions.supabase
     stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
