@@ -222,7 +222,11 @@ def check_and_use_feature(feature_name, increment_by=1):
                                 period_col = key.replace('_lifetime_count', '_period_count')
                                 initial_usage[period_col] = 0 # Reset period count
 
-                    new_usage_res = supabase.table('feature_usage').insert(initial_usage, returning='representation').execute()
+                    new_usage_res = supabase.table('feature_usage').upsert(
+                        initial_usage, 
+                        on_conflict='user_id',
+                        returning='representation'
+                    ).execute()
                     
                     if not new_usage_res.data:
                         return jsonify({"error": "Failed to initialize usage tracking."}), 500

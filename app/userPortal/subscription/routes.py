@@ -624,7 +624,7 @@ def test_db_write():
         # Use on_conflict to avoid errors if the row already exists from a previous test
         response = supabase.table('feature_usage').upsert(
             test_payload, 
-            on_conflict='user_id,period_start,period_end'
+            on_conflict='user_id'
         ).execute()
 
         current_app.logger.info(f"--- DIAGNOSTIC: Database WRITE successful. Response: {response.data} ---")
