@@ -115,7 +115,6 @@ def create_customer_portal_session():
 
         stripe_customer_id = sub_response.data['stripe_customer_id']
         
-        # Base return URL from config
         frontend_url = current_app.config.get('FRONTEND_ORIGIN')
         if not frontend_url:
              current_app.logger.error("FATAL: FRONTEND_ORIGIN is not configured on the server.")
