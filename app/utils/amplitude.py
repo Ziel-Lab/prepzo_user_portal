@@ -3,7 +3,7 @@ import uuid
 import time
 from flask import current_app
 
-AMPLITUDE_API_URL = "https://api2.amplitude.com/2/httpapi"
+AMPLITUDE_API_URL = "https://api.eu.amplitude.com/2/httpapi"
 
 def send_amplitude_event(user_id, event_type, event_properties=None, user_properties=None):
     api_key = current_app.config.get("AMPLITUDE_API_KEY")
