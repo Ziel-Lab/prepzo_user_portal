@@ -8,6 +8,7 @@ AMPLITUDE_API_URL = "https://api2.amplitude.com/2/httpapi"
 def send_amplitude_event(user_id, event_type, event_properties=None, user_properties=None):
     api_key = current_app.config.get("AMPLITUDE_API_KEY")
     if not api_key:
+        current_app.logger.error("Amplitude API key not configured")
         raise Exception("Amplitude API key not configured")
 
     event = {
@@ -25,11 +26,13 @@ def send_amplitude_event(user_id, event_type, event_properties=None, user_proper
         "api_key": api_key,
         "events": [event]
     }
-
+    current_app.logger.info(f"Sending Amplitude event: {event}")
     response = requests.post(AMPLITUDE_API_URL, json=payload)
     if response.status_code != 200:
-        # Log or handle error as needed
-        print(f"Amplitude error: {response.status_code} {response.text}")
+        current_app.logger.error(f"Amplitude error: {response.status_code} {response.text}")
+        raise Exception(f"Amplitude error: {response.status_code} {response.text}")
+    else:
+        current_app.logger.info(f"Amplitude event sent successfully: {event}")
     return response
 
 def sign_up_event(user_uuid, user_email, user_name):

@@ -82,6 +82,7 @@ def analyze_resume():
                 feedback=xano_data.get("feedback"),
                 new_resume_url=xano_data.get("new_resume_url")
             )
+            current_app.logger.info("Amplitude event sent successfully.")
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
         
