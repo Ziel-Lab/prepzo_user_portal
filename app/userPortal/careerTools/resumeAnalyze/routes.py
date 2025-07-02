@@ -4,7 +4,7 @@ from app import extensions
 import magic
 import json
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
-
+from app.utils.amplitude import resume_analyze_event
 from . import resume_analyze_bp 
 
 @resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
@@ -71,7 +71,20 @@ def analyze_resume():
                 current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
         except Exception as e:
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
-
+        
+        try:
+            resume_analyze_event(
+                user_uuid=current_user_id,
+                company_url=company_website,
+                original_resume_url=current_resume_url,
+                score=xano_data.get("score"),
+                improved_score=xano_data.get("improved_score"),
+                feedback=xano_data.get("feedback"),
+                new_resume_url=xano_data.get("new_resume_url")
+            )
+        except Exception as e:
+            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
+        
         return jsonify(xano_data), xano_response.status_code
 
     except requests.exceptions.HTTPError as http_err:
