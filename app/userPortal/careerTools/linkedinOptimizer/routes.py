@@ -5,7 +5,7 @@ import json
 import logging 
 from gotrue.errors import AuthApiError
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
-
+from app.utils.amplitude import send_amplitude_event
 
 from . import linkedin_optimizer_bp
 
@@ -90,6 +90,17 @@ def create_linkedin_optimization():
              elif hasattr(result, 'message') and result.message:
                  error_detail = result.message
              return jsonify({"error": f"Failed to save linkedin optimization data: {error_detail}"}), 500
+        
+        # Send the event to Amplitude
+        try:
+            send_amplitude_event(
+                user_uuid=current_user_id,
+                linkedin_url=linkedin_url,
+                comments=comments,
+                api_response=api_data
+            )
+        except Exception as e:
+            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
         return jsonify(api_data), 200 # Return Xano's response
 

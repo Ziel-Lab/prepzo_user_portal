@@ -1,10 +1,10 @@
-from flask import request, jsonify, current_app
+from flask import request, jsonify, current_app, g
 import requests
 
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 
 from . import job_listing_bp
-
+from app.utils.amplitude import job_reveal_event , job_search_event
 
 # @job_listing_bp.after_request
 # def _add_cors_headers(resp):
@@ -34,6 +34,7 @@ def search_jobs():
     # Handle CORS pre-flight quickly (already taken care of in require_authentication)
 
     # Retrieve configuration
+    current_user_id = str(g.user.id)
     api_key = current_app.config.get("THEIRSTACK_API_KEY")
     theirstack_url = current_app.config.get(
         "THEIRSTACK_API_URL_JOBS_SEARCH", "https://api.theirstack.com/v1/jobs/search"
@@ -65,6 +66,12 @@ def search_jobs():
             timeout=request_timeout,
         )
         response.raise_for_status()
+
+        # Send the event to Amplitude
+        try:
+            job_search_event(current_user_id, client_payload)
+        except Exception as e:
+            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
         return jsonify(response.json()), response.status_code
 
@@ -109,6 +116,7 @@ def get_job_details():
     # Handle CORS pre-flight quickly (already taken care of in require_authentication)
 
     # Retrieve configuration
+    current_user_id = str(g.user.id)
     api_key = current_app.config.get("THEIRSTACK_API_KEY")
     theirstack_url = current_app.config.get(
         "THEIRSTACK_API_URL_JOBS_SEARCH", "https://api.theirstack.com/v1/jobs/search"
@@ -140,6 +148,12 @@ def get_job_details():
             timeout=request_timeout,
         )
         response.raise_for_status()
+
+        # Send the event to Amplitude
+        try:
+            job_reveal_event(current_user_id, client_payload)
+        except Exception as e:
+            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
         return jsonify(response.json()), response.status_code
 

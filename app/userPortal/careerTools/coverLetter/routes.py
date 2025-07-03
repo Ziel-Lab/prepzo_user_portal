@@ -3,7 +3,7 @@ import requests
 from app import extensions 
 import json
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
-
+from app.utils.amplitude import cover_letter_event
 
 from . import cover_letter_bp 
 
@@ -72,6 +72,11 @@ def create_cover_letter():
         except Exception as e:
             print(f"Error inserting into cover_letter table: {str(e)}")
 
+        # Send the event to Amplitude
+        try:
+            cover_letter_event(current_user_id, job_description_text, company_website_text, current_resume_url, user_additional_comments_text, parsed_feedback_from_xano)
+        except Exception as e:
+            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
         if parsed_feedback_from_xano and "error" not in parsed_feedback_from_xano:
             return jsonify(parsed_feedback_from_xano), 200
