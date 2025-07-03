@@ -119,3 +119,61 @@ def linkedin_optimizer_event(user_uuid, linkedin_url, goals, feedback):
             "feedback": feedback,
         }
     )
+
+def subscription_created_event(user_id, plan_id, status, started_at, stripe_customer_id=None, stripe_subscription_id=None, stripe_price_id=None):
+    send_amplitude_event(
+        user_id=user_id,
+        event_type="subscription_created",
+        event_properties={
+            "plan_id": plan_id,
+            "status": status,
+            "started_at": started_at,
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+            "stripe_price_id": stripe_price_id,
+        }
+    )
+
+def subscription_cancelled_event(user_id, plan_id, status, stripe_customer_id=None, stripe_subscription_id=None, stripe_price_id=None, started_at=None, next_billing_date=None):
+    send_amplitude_event(
+        user_id=user_id,
+        event_type="subscription_cancelled",
+        event_properties={
+            "plan_id": plan_id,
+            "status": status,
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+            "stripe_price_id": stripe_price_id,
+            "started_at": started_at,
+            "next_billing_date": next_billing_date,
+        }
+    )
+
+def subscription_reactivated_event(user_id, plan_id, status, stripe_customer_id=None, stripe_subscription_id=None, stripe_price_id=None, started_at=None, next_billing_date=None):
+    send_amplitude_event(
+        user_id=user_id,
+        event_type="subscription_reactivated",
+        event_properties={
+            "plan_id": plan_id,
+            "status": status,
+            "stripe_customer_id": stripe_customer_id,
+            "stripe_subscription_id": stripe_subscription_id,
+            "stripe_price_id": stripe_price_id,
+            "started_at": started_at,
+            "next_billing_date": next_billing_date,
+        }
+    )
+
+def subscription_status_changed_event(user_id, plan_id, status, stripe_subscription_id=None, stripe_price_id=None, started_at=None, hosted_invoice_url=None):
+    send_amplitude_event(
+        user_id=user_id,
+        event_type="subscription_status_changed",
+        event_properties={
+            "plan_id": plan_id,
+            "status": status,
+            "stripe_subscription_id": stripe_subscription_id,
+            "stripe_price_id": stripe_price_id,
+            "started_at": started_at,
+            "hosted_invoice_url": hosted_invoice_url,
+        }
+    )
