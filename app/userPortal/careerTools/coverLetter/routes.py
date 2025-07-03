@@ -74,7 +74,14 @@ def create_cover_letter():
 
         # Send the event to Amplitude
         try:
-            cover_letter_event(current_user_id, job_description_text, company_website_text, current_resume_url, user_additional_comments_text, parsed_feedback_from_xano)
+            cover_letter_event(
+            current_user_id,
+            company_website_text,           
+            current_resume_url,             
+            xano_data.get("cover_letter"),              
+            user_additional_comments_text,  
+            parsed_feedback_from_xano       
+        )
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 

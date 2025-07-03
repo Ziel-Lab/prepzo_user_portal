@@ -96,8 +96,8 @@ def create_linkedin_optimization():
             send_amplitude_event(
                 user_uuid=current_user_id,
                 linkedin_url=linkedin_url,
-                comments=comments,
-                api_response=api_data
+                goals=comments,
+                feedback=api_data
             )
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
