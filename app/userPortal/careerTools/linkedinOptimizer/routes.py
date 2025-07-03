@@ -5,7 +5,7 @@ import json
 import logging 
 from gotrue.errors import AuthApiError
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
-from app.utils.amplitude import send_amplitude_event
+from app.utils.amplitude import linkedin_optimizer_event
 
 from . import linkedin_optimizer_bp
 
@@ -93,7 +93,7 @@ def create_linkedin_optimization():
         
         # Send the event to Amplitude
         try:
-            send_amplitude_event(
+            linkedin_optimizer_event(
                 user_uuid=current_user_id,
                 linkedin_url=linkedin_url,
                 goals=comments,
