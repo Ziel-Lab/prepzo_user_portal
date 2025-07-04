@@ -19,7 +19,7 @@ def create_app():
     load_dotenv()
     app = Flask(__name__)
 
-    secret_name = "userPortal"
+    secret_name = "userPortal-dev"
     region_name = "us-east-1"
     secrets = get_secret(secret_name, region_name)
     if secrets:
