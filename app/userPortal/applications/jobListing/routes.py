@@ -1,5 +1,7 @@
 from flask import request, jsonify, current_app, g
 import requests
+from datetime import datetime
+from app import extensions  # Provides initialized Supabase client
 
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 
@@ -67,9 +69,35 @@ def search_jobs():
         )
         response.raise_for_status()
 
+        response_payload = response.json()
+
+        # -------------------------------------------------------------------
+        # Mark jobs that were previously revealed by the current user
+        # -------------------------------------------------------------------
+        revealed_job_ids = set()
+        try:
+            # Fetch all job_ids this user has already revealed (cached locally)
+            revealed_res = extensions.supabase.table("revealed_jobs").select("job_id").eq("user_id", current_user_id).execute()
+            if revealed_res.data:
+                revealed_job_ids = {str(row["job_id"]) for row in revealed_res.data}
+        except Exception as e:
+            current_app.logger.warning(f"Could not fetch revealed job list from Supabase: {e}")
+
+        try:
+            # TheirStack search API returns list of jobs under the 'data' key
+            jobs_list = response_payload.get("data") if isinstance(response_payload, dict) else None
+            if jobs_list and isinstance(jobs_list, list):
+                for job in jobs_list:
+                    # Normalise job_id field name variations
+                    candidate_id = job.get("id") or job.get("job_id")
+                    if candidate_id is not None:
+                        job["already_revealed"] = str(candidate_id) in revealed_job_ids
+        except Exception as e:
+            current_app.logger.warning(f"Failed while tagging already revealed jobs: {e}")
+
         # Send the event to Amplitude
         try:
-            user_email = g.user.email or g.user.user_metadata.get("email") 
+            user_email = g.user.email or g.user.user_metadata.get("email")
             job_search_event(current_user_id, client_payload, user_properties={
                 "email": user_email,
             })
@@ -80,7 +108,7 @@ def search_jobs():
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
-        return jsonify(response.json()), response.status_code
+        return jsonify(response_payload), response.status_code
 
     except requests.exceptions.HTTPError as http_err:
         # Attempt to provide the upstream error payload when available
@@ -142,6 +170,24 @@ def get_job_details():
         # Use the JSON body as-is; default to an empty dict if none supplied
         client_payload = request.get_json(silent=True) or {}
 
+        job_id = client_payload.get("job_id") or client_payload.get("id")
+        if not job_id:
+            return jsonify({"error": "Missing required field 'job_id' in request payload."}), 400
+
+        # -------------------------------------------------------------------
+        # Attempt to serve job details from local cache to save TheirStack credits
+        # -------------------------------------------------------------------
+        try:
+            cached_res = extensions.supabase.table("revealed_jobs").select("job_details").eq("user_id", current_user_id).eq("job_id", job_id).maybe_single().execute()
+            if cached_res.data and cached_res.data.get("job_details"):
+                current_app.logger.info(f"Serving cached job details for job_id {job_id} and user {current_user_id}")
+                return jsonify(cached_res.data.get("job_details")), 200
+        except Exception as e:
+            current_app.logger.warning(f"Failed to fetch cached job details: {e}")
+
+        # -------------------------------------------------------------------
+        # No cached data – call TheirStack API and cache the response
+        # -------------------------------------------------------------------
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -156,15 +202,32 @@ def get_job_details():
         )
         response.raise_for_status()
 
+        response_payload = response.json()
+
+        # Cache the revealed job so future requests won't cost credits
+        try:
+            cache_payload = {
+                "user_id": current_user_id,
+                "job_id": job_id,
+                "job_details": response_payload,
+                "revealed_at": datetime.utcnow().isoformat(),
+            }
+            # Upsert ensures we do not create duplicates
+            extensions.supabase.table("revealed_jobs").upsert(cache_payload, on_conflict=["user_id", "job_id"]).execute()
+        except Exception as e:
+            current_app.logger.warning(f"Failed to cache revealed job in Supabase: {e}")
+
         # Send the event to Amplitude
         try:
-            user_email = g.user.email or g.user.user_metadata.get("email") 
-            job_reveal_event(current_user_id,   client_payload.get("job_id"),
+            user_email = g.user.email or g.user.user_metadata.get("email")
+            job_reveal_event(
+                current_user_id,
+                job_id,
                 client_payload.get("job_title"),
                 client_payload.get("company_name"),
                 client_payload.get("feedback"),
                 user_properties={
-                  "email": user_email,
+                    "email": user_email,
                 }
             )
             try:
@@ -174,7 +237,7 @@ def get_job_details():
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
-        return jsonify(response.json()), response.status_code
+        return jsonify(response_payload), response.status_code
 
     except requests.exceptions.HTTPError as http_err:
         # Attempt to provide the upstream error payload when available
