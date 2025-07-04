@@ -88,16 +88,17 @@ def cover_letter_event(user_uuid, company_url, resume_url, cover_letter_text, ad
         }
     )
 
-def job_search_event(user_uuid, filters_dict):
+def job_search_event(user_uuid, filters_dict, user_properties=None):
     send_amplitude_event(
         user_id=user_uuid,
         event_type="job_search",
         event_properties={
             "filters": filters_dict,  # e.g., {"location": "NY", "role": "Engineer"}
-        }
+        },
+        user_properties=user_properties
     )
 
-def job_reveal_event(user_uuid, job_id, job_title, company_name, feedback, user_email):
+def job_reveal_event(user_uuid, job_id, job_title, company_name, feedback, user_properties=None):
     send_amplitude_event(
         user_id=user_uuid,
         event_type="job_reveal",
@@ -106,8 +107,8 @@ def job_reveal_event(user_uuid, job_id, job_title, company_name, feedback, user_
             "job_title": job_title,
             "company": company_name,
             "feedback": feedback,
-            "user_email": user_email,
-        }
+        },
+        user_properties=user_properties
     )
 
 def linkedin_optimizer_event(user_uuid, linkedin_url, goals, feedback):

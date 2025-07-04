@@ -69,7 +69,10 @@ def search_jobs():
 
         # Send the event to Amplitude
         try:
-            job_search_event(current_user_id, client_payload)
+            user_email = g.user.email or g.user.user_metadata.get("email") 
+            job_search_event(current_user_id, client_payload, user_properties={
+                "email": user_email,
+            })
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
@@ -156,7 +159,9 @@ def get_job_details():
                 client_payload.get("job_title"),
                 client_payload.get("company_name"),
                 client_payload.get("feedback"),
-                user_email,
+                user_properties={
+                  "email": user_email,
+                }
             )
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
