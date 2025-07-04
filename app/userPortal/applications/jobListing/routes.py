@@ -4,7 +4,7 @@ import requests
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 
 from . import job_listing_bp
-from app.utils.amplitude import job_reveal_event , job_search_event
+from app.utils.amplitude import job_reveal_event, job_search_event, amplitude_identify_user
 
 # @job_listing_bp.after_request
 # def _add_cors_headers(resp):
@@ -73,6 +73,10 @@ def search_jobs():
             job_search_event(current_user_id, client_payload, user_properties={
                 "email": user_email,
             })
+            try:
+                amplitude_identify_user(current_user_id, {"email": user_email})
+            except Exception as e:
+                current_app.logger.warning(f"Failed to send Amplitude Identify call: {e}")
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
@@ -163,6 +167,10 @@ def get_job_details():
                   "email": user_email,
                 }
             )
+            try:
+                amplitude_identify_user(current_user_id, {"email": user_email})
+            except Exception as e:
+                current_app.logger.warning(f"Failed to send Amplitude Identify call: {e}")
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 

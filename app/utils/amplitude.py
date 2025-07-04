@@ -4,6 +4,7 @@ import time
 from flask import current_app
 
 AMPLITUDE_API_URL = "https://api.eu.amplitude.com/2/httpapi"
+AMPLITUDE_IDENTIFY_URL = "https://api.eu.amplitude.com/identify"
 
 def send_amplitude_event(user_id, event_type, event_properties=None, user_properties=None):
     api_key = current_app.config.get("AMPLITUDE_API_KEY")
@@ -179,3 +180,29 @@ def subscription_status_changed_event(user_id, plan_id, status, stripe_subscript
             "hosted_invoice_url": hosted_invoice_url,
         }
     )
+
+def amplitude_identify_user(user_id, user_properties):
+    """
+    Send an Identify call to Amplitude to set persistent user properties for a user.
+    """
+    api_key = current_app.config.get("AMPLITUDE_API_KEY")
+    if not api_key:
+        current_app.logger.error("Amplitude API key not configured for Identify call")
+        raise Exception("Amplitude API key not configured")
+
+    payload = {
+        "api_key": api_key,
+        "identification": [
+            {
+                "user_id": str(user_id),
+                "user_properties": user_properties
+            }
+        ]
+    }
+    response = requests.post(AMPLITUDE_IDENTIFY_URL, json=payload)
+    if response.status_code != 200:
+        current_app.logger.error(f"Amplitude Identify error: {response.status_code} {response.text}")
+        raise Exception(f"Amplitude Identify error: {response.status_code} {response.text}")
+    else:
+        current_app.logger.info(f"Amplitude Identify call sent successfully for user {user_id}.")
+    return response
