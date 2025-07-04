@@ -193,11 +193,17 @@ def get_job_details():
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
+        upstream_payload = {
+            k: v for k, v in client_payload.items() if k not in ("job_id","id")
+        }
+        upstream_payload.setdefault("job_id_or",[job_id])
+        upstream_payload.setdefault("limit",1)
+        
 
         response = requests.post(
             theirstack_url,
             headers=headers,
-            json=client_payload,
+            json=upstream_payload,
             timeout=request_timeout,
         )
         response.raise_for_status()
