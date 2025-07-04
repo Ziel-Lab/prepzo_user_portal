@@ -97,7 +97,7 @@ def job_search_event(user_uuid, filters_dict):
         }
     )
 
-def job_reveal_event(user_uuid, job_id, job_title, company_name, feedback):
+def job_reveal_event(user_uuid, job_id, job_title, company_name, feedback, user_email):
     send_amplitude_event(
         user_id=user_uuid,
         event_type="job_reveal",
@@ -106,6 +106,7 @@ def job_reveal_event(user_uuid, job_id, job_title, company_name, feedback):
             "job_title": job_title,
             "company": company_name,
             "feedback": feedback,
+            "user_email": user_email,
         }
     )
 
