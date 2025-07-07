@@ -277,3 +277,48 @@ def get_job_details():
             jsonify({"error": "An unexpected error occurred", "details": str(e)}),
             500,
         ) 
+
+@job_listing_bp.route("/revealed-jobs-history", methods=["GET", "OPTIONS"])
+@require_authentication
+def get_revealed_jobs_history():
+    """Return a list of jobs this user has previously revealed.
+
+    The response is ordered by ``revealed_at`` descending. An optional ``limit``
+    query-string parameter can be provided to restrict the number of records
+    returned (default = 50). Requires a valid JWT and therefore uses the
+    ``@require_authentication`` decorator.
+    """
+    # Handle CORS pre-flight quickly (already taken care of in require_authentication)
+
+    current_user_id = str(g.user.id)
+    supabase = extensions.supabase
+
+    try:
+        # Optional ?limit=n param for pagination / UI convenience
+        try:
+            limit = int(request.args.get("limit", 50))
+            if limit <= 0:
+                limit = 50
+        except (TypeError, ValueError):
+            limit = 50
+
+        # Fetch rows and order by revealed_at DESC so newest first
+        query = (
+            supabase
+            .table("revealed_jobs")
+            .select("job_id, job_details, revealed_at")
+            .eq("user_id", current_user_id)
+            .order("revealed_at", desc=True)
+            .limit(limit)
+        )
+        res = query.execute()
+        data = res.data or []
+
+        return jsonify(data), 200
+
+    except Exception as e:
+        current_app.logger.error(
+            f"Failed to retrieve revealed jobs history for user {current_user_id}: {e}",
+            exc_info=True,
+        )
+        return jsonify({"error": "Could not fetch job history."}), 500 
