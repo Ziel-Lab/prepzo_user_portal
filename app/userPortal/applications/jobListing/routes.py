@@ -218,8 +218,14 @@ def get_job_details():
                 "job_details": response_payload,
                 "revealed_at": datetime.utcnow().isoformat(),
             }
-            # Upsert ensures we do not create duplicates
-            extensions.supabase.table("revealed_jobs").upsert(cache_payload, on_conflict=["user_id", "job_id"]).execute()
+            # Supabase expects a single comma-separated string for the `on_conflict` argument
+            # when specifying multiple columns. Passing a Python list generates multiple
+            # query parameters (one per element) which PostgREST treats as invalid and
+            # results in the upsert silently failing. Use the canonical string form instead.
+            extensions.supabase.table("revealed_jobs").upsert(
+                cache_payload,
+                on_conflict="user_id, job_id"
+            ).execute()
         except Exception as e:
             current_app.logger.warning(f"Failed to cache revealed job in Supabase: {e}")
 
