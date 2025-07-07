@@ -74,14 +74,37 @@ def search_jobs():
         # -------------------------------------------------------------------
         # Mark jobs that were previously revealed by the current user
         # -------------------------------------------------------------------
-        revealed_job_ids = set()
         try:
-            # Fetch all job_ids this user has already revealed (cached locally)
-            revealed_res = extensions.supabase.table("revealed_jobs").select("job_id").eq("user_id", current_user_id).execute()
+            # Fetch all jobs this user has already revealed (cached locally)
+            # We retrieve both job_id and the cached job_details so we can merge the
+            # full information into the search results and avoid spending credits
+            # again for already-revealed jobs.
+            revealed_res = (
+                extensions.supabase
+                .table("revealed_jobs")
+                .select("job_id, job_details")
+                .eq("user_id", current_user_id)
+                .execute()
+            )
+
+            revealed_job_ids = set()
+            revealed_jobs_map = {}
+
             if revealed_res.data:
-                revealed_job_ids = {str(row["job_id"]) for row in revealed_res.data}
+                for row in revealed_res.data:
+                    jid = str(row.get("job_id"))
+                    if jid:
+                        revealed_job_ids.add(jid)
+                        # Store cached details when available; may be None
+                        if row.get("job_details"):
+                            revealed_jobs_map[jid] = row["job_details"]
+            else:
+                revealed_jobs_map = {}
         except Exception as e:
             current_app.logger.warning(f"Could not fetch revealed job list from Supabase: {e}")
+            # Gracefully degrade by falling back to empty structures
+            revealed_job_ids = set()
+            revealed_jobs_map = {}
 
         try:
             # TheirStack search API returns list of jobs under the 'data' key
@@ -90,8 +113,39 @@ def search_jobs():
                 for job in jobs_list:
                     # Normalise job_id field name variations
                     candidate_id = job.get("id") or job.get("job_id")
-                    if candidate_id is not None:
-                        job["already_revealed"] = str(candidate_id) in revealed_job_ids
+                    if candidate_id is None:
+                        continue
+
+                    candidate_id_str = str(candidate_id)
+
+                    if candidate_id_str in revealed_job_ids:
+                        # Mark as already revealed
+                        job["already_revealed"] = True
+
+                        # If we have cached job_details, merge them so the
+                        # client receives the full, un-masked data without
+                        # having to hit the reveal endpoint (saves credits).
+                        cached_details = revealed_jobs_map.get(candidate_id_str)
+
+                        if cached_details and isinstance(cached_details, dict):
+                            # TheirStack job_details are typically returned as
+                            # {"data": [ { ...full job info... } ] }
+                            cached_data_list = cached_details.get("data")
+
+                            if (
+                                cached_data_list
+                                and isinstance(cached_data_list, list)
+                                and len(cached_data_list) > 0
+                                and isinstance(cached_data_list[0], dict)
+                            ):
+                                # Merge detailed fields into the existing job
+                                job.update(cached_data_list[0])
+                            else:
+                                # Fallback: merge whatever top-level keys we
+                                # have (handles unexpected shapes)
+                                job.update(cached_details)
+                    else:
+                        job["already_revealed"] = False
         except Exception as e:
             current_app.logger.warning(f"Failed while tagging already revealed jobs: {e}")
 
