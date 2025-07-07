@@ -216,6 +216,7 @@ def get_job_details():
                 "user_id": current_user_id,
                 "job_id": job_id,
                 "job_details": response_payload,
+                "status": "revealed",  # Default status when job is first revealed
                 "revealed_at": datetime.utcnow().isoformat(),
             }
             # Supabase expects a single comma-separated string for the `on_conflict` argument
@@ -306,7 +307,7 @@ def get_revealed_jobs_history():
         query = (
             supabase
             .table("revealed_jobs")
-            .select("job_id, job_details, revealed_at")
+            .select("job_id, job_details,status, revealed_at")
             .eq("user_id", current_user_id)
             .order("revealed_at", desc=True)
             .limit(limit)
@@ -322,3 +323,74 @@ def get_revealed_jobs_history():
             exc_info=True,
         )
         return jsonify({"error": "Could not fetch job history."}), 500 
+
+@job_listing_bp.route("/update-job-status", methods=["POST", "OPTIONS"])
+@require_authentication
+def update_job_status():
+    """Update the status of a previously revealed job.
+
+    Accepts JSON payload with job_id and status. Valid statuses are:
+    'revealed', 'applied', 'scheduled', 'interview', 'rejected', 'offered', 'accepted'
+    
+    Requires a valid JWT and the job must have been previously revealed by this user.
+    """
+    current_user_id = str(g.user.id)
+    supabase = extensions.supabase
+
+    # Define valid job statuses (enum-like validation)
+    VALID_STATUSES = {
+        "revealed",     # Default when job is first revealed
+        "applied",      # User applied to this job
+        "scheduled",    # Interview/call scheduled
+        "interview",    # Interview in progress or completed
+        "rejected",     # Application rejected
+        "offered",      # Job offer received
+        "accepted",     # Job offer accepted
+        "withdrawn"     # User withdrew application
+    }
+
+    try:
+        data = request.get_json(silent=True) or {}
+        job_id = data.get("job_id")
+        new_status = data.get("status")
+
+        if not job_id:
+            return jsonify({"error": "Missing required field 'job_id'."}), 400
+
+        if not new_status:
+            return jsonify({"error": "Missing required field 'status'."}), 400
+
+        if new_status not in VALID_STATUSES:
+            return jsonify({
+                "error": f"Invalid status '{new_status}'. Valid statuses are: {', '.join(sorted(VALID_STATUSES))}"
+            }), 400
+
+        # Check if the job exists for this user
+        existing_job = supabase.table("revealed_jobs").select("job_id").eq("user_id", current_user_id).eq("job_id", job_id).maybe_single().execute()
+
+        if not existing_job.data:
+            return jsonify({"error": "Job not found. You can only update status for jobs you have previously revealed."}), 404
+
+        # Update the status
+        update_payload = {
+            "status": new_status,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+        result = supabase.table("revealed_jobs").update(update_payload).eq("user_id", current_user_id).eq("job_id", job_id).execute()
+
+        if not result.data:
+            return jsonify({"error": "Failed to update job status."}), 500
+
+        return jsonify({
+            "message": "Job status updated successfully.",
+            "job_id": job_id,
+            "status": new_status
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(
+            f"Failed to update job status for user {current_user_id}: {e}",
+            exc_info=True,
+        )
+        return jsonify({"error": "Could not update job status."}), 500 
