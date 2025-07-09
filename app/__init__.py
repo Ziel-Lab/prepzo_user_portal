@@ -9,8 +9,9 @@ from .userPortal.careerTools.resumeAnalyze import resume_analyze_bp
 from .userPortal.careerTools.coverLetter import cover_letter_bp
 from .userPortal.careerTools.linkedinOptimizer import linkedin_optimizer_bp
 from .userPortal.subscription import subscription_bp
+from .userPortal.mockInterview import mock_interview_bp
 from .auth import auth_bp
-from .extensions import init_supabase
+from .extensions import init_supabase, init_livekit
 from .secrets import get_secret
 import re
 from .userPortal.applications.jobListing import job_listing_bp
@@ -39,6 +40,7 @@ def create_app():
     app.logger.addHandler(stream_handler)
 
     init_supabase(app)  # Initializes Supabase client with app config
+    init_livekit(app)   # Initializes LiveKit client with app config
 
     @app.after_request
     def after_request_func(response):
@@ -98,5 +100,6 @@ def create_app():
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
+    app.register_blueprint(mock_interview_bp)
 
     return app

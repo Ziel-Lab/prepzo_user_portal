@@ -2,7 +2,16 @@ import sys
 import logging
 from supabase import create_client, ClientOptions
 
+# LiveKit imports - using the correct modern API
+try:
+    from livekit import api
+    LIVEKIT_AVAILABLE = True
+except ImportError:
+    api = None
+    LIVEKIT_AVAILABLE = False
+
 supabase = None
+livekit_client = None
 
 def init_supabase(app):
     global supabase
@@ -42,3 +51,51 @@ def init_supabase(app):
         supabase = None
 
     app.extensions["supabase"] = supabase
+
+def init_livekit(app):
+    global livekit_client
+    logger = app.logger if hasattr(app, "logger") else logging.getLogger("livekit")
+
+    LIVEKIT_URL = app.config.get("LIVEKIT_URL")
+    LIVEKIT_API_KEY = app.config.get("LIVEKIT_API_KEY")
+    LIVEKIT_API_SECRET = app.config.get("LIVEKIT_API_SECRET")
+
+    if not all([LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET]):
+        logger.warning(
+            "LiveKit credentials missing. LiveKit client NOT initialized. "
+            "Mock interview functionality will not be available."
+        )
+        livekit_client = None
+        app.extensions["livekit"] = None
+        return
+
+    # Check if LiveKit API is available
+    if not LIVEKIT_AVAILABLE:
+        logger.warning(
+            "LiveKit package not installed. LiveKit client NOT initialized. "
+            "Mock interview functionality will not be available. "
+            "Install with: pip install livekit"
+        )
+        livekit_client = None
+        app.extensions["livekit"] = None
+        return
+
+    try:
+        logger.info(f"Initializing LiveKit client for URL: {LIVEKIT_URL}")
+
+        # Initialize LiveKit API client 
+        # For now, just store credentials - actual service will be initialized when needed
+        livekit_client = {
+            'url': LIVEKIT_URL,
+            'api_key': LIVEKIT_API_KEY,
+            'api_secret': LIVEKIT_API_SECRET,
+            'available': LIVEKIT_AVAILABLE
+        }
+
+        logger.info("LiveKit client initialized successfully.")
+
+    except Exception as e:
+        logger.error(f"LiveKit initialization error: {e}", exc_info=True)
+        livekit_client = None
+
+    app.extensions["livekit"] = livekit_client
