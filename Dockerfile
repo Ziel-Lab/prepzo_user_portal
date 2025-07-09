@@ -6,9 +6,12 @@ WORKDIR /app
 COPY requirements.txt .
 
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    gunicorn
 
 COPY . .
+
+RUN chmod +x entrypoint.sh
 
 EXPOSE 5000
 
@@ -19,4 +22,4 @@ EXPOSE 5000
 # and run in debug mode, you might set these, but for production, 
 # you'd typically use a production-grade WSGI server like Gunicorn.
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "run:app"] 
+ENTRYPOINT ["./entrypoint.sh"]
