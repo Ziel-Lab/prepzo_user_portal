@@ -473,16 +473,10 @@ def main():
     print("\nStarting LiveKit Interview Agent in Production Mode...")
     
     try:
-        # Production-ready worker options
-        worker_options = agents.WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            # Production configurations
-            auto_subscribe=True,
-            auto_reconnect=True,
-            worker_threads=4,  # Handle multiple concurrent rooms
-        )
+        # Use the correct WorkerOptions for the current LiveKit agents version
+        worker_options = agents.WorkerOptions(entrypoint_fnc=entrypoint)
         
-        # Set up CLI with production options
+        # Set up CLI with worker options
         agents.cli.run_app(worker_options)
     except Exception as e:
         logger.error(f"Error running agent: {str(e)}")
