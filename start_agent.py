@@ -45,9 +45,14 @@ if __name__ == "__main__":
         print("AWS secrets loaded from Secret Manager")
         
         # Handle command line arguments (pass through to agent)
-        if len(sys.argv) > 1:
-            # Override sys.argv for the agent to pick up the mode (dev, start, etc.)
-            sys.argv = ['agent.py'] + sys.argv[1:]
+        # For production, ensure we use 'start' mode
+        agent_mode = "start"  # Default to production
+        if len(sys.argv) > 1 and sys.argv[1] in ['dev', 'console']:
+            agent_mode = sys.argv[1]
+        
+        # Override sys.argv for the agent to pick up the mode
+        sys.argv = ['agent.py', agent_mode]
+        print(f"Running agent in {agent_mode} mode")
         
         # Now run the agent
         main() 

@@ -127,11 +127,12 @@ def run_livekit_agent():
     sys.stdout.flush()
     try:
         # Get command line arguments (dev, start, etc.)
-        agent_mode = "start"  # Default to production mode
-        if len(sys.argv) > 1:
-            agent_mode = sys.argv[1]
+        # For production, always use 'start' mode
+        agent_mode = "start"  # Production mode for LiveKit agent
+        if len(sys.argv) > 1 and sys.argv[1] in ['dev', 'console']:
+            agent_mode = sys.argv[1]  # Allow dev/console modes if explicitly requested
         
-        print(f"Agent mode: {agent_mode}")
+        print(f"Agent mode: {agent_mode} (Production)")
         sys.stdout.flush()
         
         agent_process = subprocess.Popen(
@@ -184,10 +185,11 @@ def main():
     else:
         server_type = "Flask Dev Server"
     
-    print("Prepzo User Portal - Starting All Services")
+    print("Prepzo User Portal - Production Services")
     print("=" * 50)
     print(f"Web App: http://localhost:5000 ({server_type})")
-    print("LiveKit Agent: Running in background")
+    print("LiveKit Agent: Production Mode (port 8081 debug)")
+    print("Environment: Production-Ready")
     print("=" * 50)
     print("Press Ctrl+C to stop all services")
     print()
