@@ -68,13 +68,38 @@ def run_flask_app():
     print("Starting Flask Web Application...")
     sys.stdout.flush()
     try:
-        flask_process = subprocess.Popen(
-            [sys.executable, "run.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=0  # Unbuffered
-        )
+        # Choose server based on platform and environment
+        use_production = os.environ.get('USE_PRODUCTION', 'true').lower() == 'true'
+        is_windows = sys.platform == "win32"
+        
+        if use_production:
+            if is_windows:
+                # Windows: Use Waitress (Windows-compatible WSGI server)
+                flask_process = subprocess.Popen(
+                    [sys.executable, "-m", "waitress", "--host=0.0.0.0", "--port=5000", "run:app"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    universal_newlines=True,
+                    bufsize=0
+                )
+            else:
+                # Unix/Linux: Use Gunicorn
+                flask_process = subprocess.Popen(
+                    ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "run:app"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    universal_newlines=True,
+                    bufsize=0
+                )
+        else:
+            # Development: Use Flask dev server
+            flask_process = subprocess.Popen(
+                [sys.executable, "run.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=0  # Unbuffered
+            )
         
         # Stream Flask output
         for line in iter(flask_process.stdout.readline, ''):
@@ -151,9 +176,17 @@ def monitor_processes():
 
 def main():
     """Main function to orchestrate both services"""
+    use_production = os.environ.get('USE_PRODUCTION', 'true').lower() == 'true'
+    is_windows = sys.platform == "win32"
+    
+    if use_production:
+        server_type = "Waitress (Production)" if is_windows else "Gunicorn (Production)"
+    else:
+        server_type = "Flask Dev Server"
+    
     print("Prepzo User Portal - Starting All Services")
     print("=" * 50)
-    print("Web App: http://localhost:5000")
+    print(f"Web App: http://localhost:5000 ({server_type})")
     print("LiveKit Agent: Running in background")
     print("=" * 50)
     print("Press Ctrl+C to stop all services")
