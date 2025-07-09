@@ -32,6 +32,12 @@ except ImportError:
         def get_enhanced_interview_prompt(context):
             return f"You are interviewing for {context.get('position', 'a position')}. Conduct a professional interview."
 
+# Configure logging for production
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # LiveKit agents imports
@@ -302,10 +308,10 @@ async def entrypoint(ctx: agents.JobContext):
             room=ctx.room,
             agent=assistant,
             room_input_options=RoomInputOptions(
-                # LiveKit Cloud enhanced noise cancellation
-                # - If self-hosting, omit this parameter
+                # Production: Enable LiveKit Cloud enhanced noise cancellation
+                # - For production, always use LiveKit Cloud features
                 # - For telephony applications, use `BVCTelephony` for best results
-                noise_cancellation=noise_cancellation.BVC() if os.getenv('LIVEKIT_CLOUD', 'true').lower() == 'true' else None,
+                noise_cancellation=noise_cancellation.BVC(),
             ),
         )
         logger.info("AgentSession started successfully")
@@ -449,7 +455,7 @@ def check_configuration():
 
 def main():
     """Main entry point for the interview agent"""
-    print("Mock Interview Agent")
+    print("Mock Interview Agent - Production Ready")
     print("=" * 40)
     
     # Check LiveKit agents availability
@@ -464,11 +470,14 @@ def main():
     if not check_configuration():
         return
     
-    print("\nStarting LiveKit Interview Agent...")
+    print("\nStarting LiveKit Interview Agent in Production Mode...")
     
     try:
-        # Set up CLI
-        agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint))
+        # Use the correct WorkerOptions for the current LiveKit agents version
+        worker_options = agents.WorkerOptions(entrypoint_fnc=entrypoint)
+        
+        # Set up CLI with worker options
+        agents.cli.run_app(worker_options)
     except Exception as e:
         logger.error(f"Error running agent: {str(e)}")
         print(f"Error running agent: {str(e)}")

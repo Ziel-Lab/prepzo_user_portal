@@ -22,4 +22,6 @@ def get_user_profile():
         'avatar_url': user.user_metadata.get('avatar_url') or user.user_metadata.get('picture'),
     }
     
-    return jsonify(profile_data), 200 
+    return jsonify(profile_data), 200
+
+ 
