@@ -9,6 +9,8 @@ from .helpers import get_anniversary_period, require_authentication, get_user_di
 from postgrest.exceptions import APIError
 from types import SimpleNamespace
 import json
+import hmac
+import hashlib
 
 @subscription_bp.route("/status", methods=["GET", "OPTIONS"])
 @require_authentication
@@ -290,311 +292,242 @@ def reactivate_subscription():
         current_app.logger.error(f"Stripe reactivation failed for user {uid}: {e}", exc_info=True)
         return jsonify({'error': "Could not reactivate subscription."}), 500
 
-@subscription_bp.route("/stripe/webhook", methods=["POST", "OPTIONS"])
+@subscription_bp.route("/stripe/webhook", methods=["POST"])
 def stripe_webhook():
-    """Handles incoming webhooks from Stripe to update subscription status in the DB."""
+    """
+    Handles incoming webhooks from Stripe to update subscription status in the DB.
+    SECURITY: This endpoint validates Stripe signatures and uses admin client to bypass RLS.
+    """
     current_app.logger.critical("--- STRIPE WEBHOOK ENDPOINT HIT! ---")
 
     stripe_webhook_secret = current_app.config.get("STRIPE_WEBHOOK_SECRET")
     stripe.api_key = current_app.config.get("STRIPE_SECRET_API_KEY")
+    
     if not stripe_webhook_secret or not stripe.api_key:
-        current_app.logger.warning("Stripe webhook secret or API key is not configured. Aborting webhook processing.")
-        return jsonify({"error": "Stripe webhook is not configured on the server."}), 503
+        current_app.logger.error("SECURITY ERROR: Stripe webhook secret or API key is not configured. Rejecting webhook.")
+        return jsonify({"error": "Webhook not configured"}), 503
         
     payload = request.data
     sig_header = request.headers.get('Stripe-Signature')
-    supabase = extensions.supabase
+    
+    # SECURITY: Validate request size to prevent DoS
+    if len(payload) > 1024 * 1024:  # 1MB limit
+        current_app.logger.error("SECURITY ERROR: Webhook payload too large")
+        return jsonify({"error": "Payload too large"}), 413
+    
+    # SECURITY: Validate signature header format
+    if not sig_header or not sig_header.startswith('t='):
+        current_app.logger.error("SECURITY ERROR: Invalid or missing Stripe signature header")
+        return jsonify({"error": "Invalid signature"}), 400
+
+    # Use admin client for webhook operations (bypasses RLS as needed)
+    try:
+        supabase = extensions.get_admin_client()
+    except RuntimeError as e:
+        current_app.logger.error(f"FATAL: Admin Supabase client not available: {e}")
+        return jsonify({"error": "Service temporarily unavailable"}), 503
 
     try:
-        event = stripe.Webhook.construct_event(payload=payload, sig_header=sig_header, secret=stripe_webhook_secret)
-    except (ValueError, stripe.error.SignatureVerificationError) as e:
-        current_app.logger.error(f"Stripe webhook error: {e}")
-        return 'Invalid signature or payload', 400
+        # SECURITY: Stripe signature verification
+        event = stripe.Webhook.construct_event(
+            payload=payload, 
+            sig_header=sig_header, 
+            secret=stripe_webhook_secret
+        )
+    except ValueError as e:
+        current_app.logger.error(f"SECURITY ERROR: Invalid webhook payload: {e}")
+        return jsonify({"error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError as e:
+        current_app.logger.error(f"SECURITY ERROR: Stripe signature verification failed: {e}")
+        return jsonify({"error": "Invalid signature"}), 400
 
     event_type = event['type']
     data = event['data']['object']
     current_app.logger.info(f"--- STRIPE WEBHOOK: Received event '{event_type}' ---")
 
-    if event_type == 'checkout.session.completed':
-        session = data
-        user_id = session.get('client_reference_id')
-        customer_id = session.get('customer')
-        subscription_id = session.get('subscription')
+    # Input validation for event data
+    if not isinstance(data, dict):
+        current_app.logger.error("SECURITY ERROR: Invalid event data format")
+        return jsonify({"error": "Invalid event data"}), 400
 
-        if not all([user_id, customer_id, subscription_id]):
-            current_app.logger.error(f"Webhook Error: 'checkout.session.completed' is missing required IDs. Session: {session.get('id')}")
-            return jsonify(success=True) # Acknowledge the event to prevent retries
+    try:
+        if event_type == 'checkout.session.completed':
+            session = data
+            user_id = session.get('client_reference_id')
+            customer_id = session.get('customer')
+            subscription_id = session.get('subscription')
 
-        try:
-            # Get user's display name for logging purposes
-            user_res = supabase.auth.admin.get_user_by_id(user_id)
-            display_name = get_user_display_name(user_res.user) if user_res.user else "User"
+            # SECURITY: Validate required fields
+            if not all([user_id, customer_id, subscription_id]):
+                current_app.logger.error(f"SECURITY WARNING: 'checkout.session.completed' missing required IDs. Session: {session.get('id')}")
+                return jsonify(success=True) # Acknowledge the event to prevent retries
 
-            # This handler's responsibility is to add the Stripe IDs and display_name
-            # to the 'processing' record created by the /create-checkout-session endpoint.
-            update_payload = {
-                'stripe_customer_id': customer_id,
-                'stripe_subscription_id': subscription_id,
-                'display_name': display_name,
-                'updated_at': datetime.utcnow().isoformat()
-            }
-            
-            # Find the record using the user_id and confirm its status is 'processing'.
-            # The .execute() returns the updated record in a list.
-            res = supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
+            # SECURITY: Validate user_id format (should be UUID)
+            if not isinstance(user_id, str) or len(user_id) != 36:
+                current_app.logger.error(f"SECURITY ERROR: Invalid user_id format: {user_id}")
+                return jsonify({"error": "Invalid user ID"}), 400
 
-            # If the update fails (e.g., no 'processing' record found), it's a critical error.
-            if not res.data:
-                error_message = f"Webhook 'checkout.session.completed' failed. Could not find a 'processing' user_subscription record for user_id: {user_id} to update. Retrying."
-                current_app.logger.error(error_message)
-                return jsonify({"status": "error", "message": error_message}), 500
-
-            current_app.logger.info(f"Webhook 'checkout.session.completed' successfully added Stripe IDs for user {user_id}.")
-
-            # Now, log this 'processing' state to the history table for a complete audit trail.
-            updated_record = res.data[0]
-            history_payload = {
-                'user_id': user_id,
-                'display_name': display_name,
-                'plan_id': updated_record.get('plan_id'),
-                'status': 'processing',
-                'stripe_customer_id': customer_id,
-                'stripe_subscription_id': subscription_id,
-                'stripe_price_id': updated_record.get('stripe_price_id'),
-                'started_at': updated_record.get('started_at') # Use the original start time
-            }
-            supabase.table('subscription_histories').insert(history_payload).execute()
-            current_app.logger.info(f"Successfully logged 'processing' subscription history for user {user_id}")
-
-        except Exception as e:
-            error_message = f"Webhook processing failed for '{event_type}'. User: {user_id}. Error: {e}"
-            current_app.logger.error(error_message, exc_info=True)
-            # Use 500 to signal Stripe to retry, as this might be a transient DB issue.
-            return jsonify({"status": "error", "message": str(e)}), 500
-
-    elif event_type == 'invoice.payment_succeeded':
-        invoice = data
-        subscription_id = invoice.get('subscription')
-        customer_id = invoice.get('customer')
-        billing_reason = invoice.get('billing_reason')
-
-        current_app.logger.info(f"Webhook 'invoice.payment_succeeded' for subscription_id: {subscription_id}, customer_id: {customer_id}, reason: {billing_reason}")
-
-        if not customer_id or not subscription_id or billing_reason not in ['subscription_cycle', 'subscription_create', 'subscription_update']:
-            current_app.logger.info(f"Ignoring 'invoice.payment_succeeded' for non-subscription event. Reason: {billing_reason}")
-            return jsonify(success=True)
-
-        try:
-            # Find the line item that corresponds to the subscription, not a proration.
-            # This is crucial for plan changes, as invoices can have multiple lines.
-            subscription_line_item = next((item for item in invoice['lines']['data'] if item.get('type') == 'subscription'), None)
-
-            if not subscription_line_item:
-                current_app.logger.error(f"Webhook Error: Invoice {invoice.get('id')} does not contain a 'subscription' line item. Cannot process plan. This may be a one-off charge, which is safe to ignore.")
-                return jsonify(success=True) # It's not a subscription payment, so we're done.
-
-            price_id = subscription_line_item['price']['id']
-            
-            # Find the user by stripe_subscription_id. This can fail due to a race condition
-            # with the 'checkout.session.completed' webhook, which creates the record.
             try:
-                user_res = supabase.table('user_subscriptions').select('user_id').eq('stripe_subscription_id', subscription_id).single().execute()
-            except APIError as e:
-                if e.code == 'PGRST116': # "JSON object requested, multiple (or no) rows returned"
-                    current_app.logger.warning(f"Webhook 'invoice.payment_succeeded' could not find subscription {subscription_id}. This is likely a race condition with 'checkout.session.completed'. Asking Stripe to retry.")
-                    return jsonify(error="Subscription not processed yet, retry later"), 503
-                else:
-                    raise # Re-raise other API errors
+                # Get user's display name for logging purposes (using admin client)
+                user_res = supabase.auth.admin.get_user_by_id(user_id)
+                display_name = get_user_display_name(user_res.user) if user_res.user else "User"
 
-            user_id = user_res.data['user_id']
-
-            # Find the corresponding internal plan in our database using the Stripe price_id from the invoice.
-            # This is the correct, database-driven way to link a Stripe payment to an internal plan.
-            plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
-
-            if not (plan_res and plan_res.data):
-                # This is a critical configuration error. A payment succeeded for a Stripe Price ID
-                # that does not exist in our subscription_plans table.
-                error_message = f"Configuration Error: No plan found in the database for stripe_price_id '{price_id}'. Payment cannot be processed for user {user_id}."
-                current_app.logger.error(error_message)
-                return jsonify(error=error_message), 500
-            
-            new_plan_id = plan_res.data['id']
-            
-            # Get dates from the invoice object
-            period_start_ts = invoice['period_start']
-            period_end_ts = invoice['period_end']
-            started_at = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
-            ends_at = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
-
-            # Update user's current subscription state in the user_subscriptions table
-            update_payload = {
-                'status': 'active',
-                'plan_id': new_plan_id,
-                'current_period_start': started_at.isoformat(),
-                'current_period_end': ends_at.isoformat(),
-                'next_billing_date': ends_at.isoformat(),
-                'stripe_price_id': price_id,
-            }
-            supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
-
-            # Log this event to the history table
-            history_payload = {
-                'user_id': user_id,
-                'plan_id': new_plan_id,
-                'status': 'active',
-                'stripe_subscription_id': subscription_id,
-                'started_at': started_at.isoformat(),
-                'hosted_invoice_url': invoice.get('hosted_invoice_url')
-            }
-            supabase.table('subscription_histories').insert(history_payload).execute()
-
-            current_app.logger.info(f"Successfully logged 'active' (payment succeeded) subscription for user {user_id}")
-
-        except Exception as e:
-            error_message = f"Webhook processing failed for '{event_type}'. Customer: {customer_id}. Error: {e}"
-            current_app.logger.error(error_message, exc_info=True)
-            return jsonify(error=error_message), 500
-
-    elif event_type == 'customer.subscription.updated':
-        subscription = data
-        subscription_id = subscription.get('id')
-        customer_id = subscription.get('customer')
-        status = subscription.get('status')
-        current_app.logger.info(f"Webhook: 'customer.subscription.updated' for sub_id {subscription_id} with status '{status}'")
-
-        if not all([subscription_id, customer_id, status]):
-            current_app.logger.error(f"Webhook Error: 'customer.subscription.updated' is missing required IDs. Sub ID: {subscription_id}")
-            return jsonify(success=True)
-
-        try:
-            # Find the user by their Stripe subscription ID.
-            sub_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
-            user_id = sub_res.data['user_id']
-            display_name = sub_res.data['display_name']
-
-            if not user_id:
-                raise Exception(f"No user found for subscription_id {subscription_id}")
-
-            # Extract the price ID from the first line item.
-            if not subscription.get('items') or not subscription['items'].get('data'):
-                raise Exception(f"Subscription {subscription_id} has no line items.")
-            
-            price_id = subscription['items']['data'][0]['price']['id']
-            
-            # Find the corresponding internal plan ID from our database.
-            plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
-            if not plan_res.data:
-                raise Exception(f"Configuration Error: No plan found for stripe_price_id '{price_id}'.")
-            
-            new_plan_id = plan_res.data['id']
-            
-            # Get period dates from the subscription object.
-            period_start_ts = subscription['current_period_start']
-            period_end_ts = subscription['current_period_end']
-            started_at = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
-            ends_at = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
-            
-            # --- NEW: Fetch the invoice to get the hosted_invoice_url ---
-            hosted_invoice_url = None
-            latest_invoice_id = subscription.get('latest_invoice')
-            if latest_invoice_id:
-                try:
-                    invoice = stripe.Invoice.retrieve(latest_invoice_id)
-                    hosted_invoice_url = invoice.get('hosted_invoice_url')
-                except Exception as e:
-                    current_app.logger.error(f"Failed to retrieve invoice {latest_invoice_id} for user {user_id}. Error: {e}")
-            # --- END NEW ---
-
-            # Update user's current subscription state.
-            update_payload = {
-                'status': status,
-                'plan_id': new_plan_id,
-                'current_period_start': started_at.isoformat(),
-                'current_period_end': ends_at.isoformat(),
-                'next_billing_date': ends_at.isoformat(),
-                'stripe_price_id': price_id,
-                'updated_at': datetime.utcnow().isoformat()
-            }
-            supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
-
-            # Log this update to the history table for auditing.
-            history_payload = {
-                'user_id': user_id,
-                'display_name': display_name,
-                'plan_id': new_plan_id,
-                'status': status,
-                'stripe_subscription_id': subscription_id,
-                'stripe_price_id': price_id,
-                'started_at': started_at.isoformat(),
-                'hosted_invoice_url': hosted_invoice_url # Add the URL here
-            }
-            supabase.table('subscription_histories').insert(history_payload).execute()
-
-            current_app.logger.info(f"Successfully processed 'customer.subscription.updated' for user {user_id}, plan_id {new_plan_id}.")
-
-        except Exception as e:
-            error_message = f"Webhook processing failed for '{event_type}'. Subscription: {subscription_id}. Error: {e}"
-            current_app.logger.error(error_message, exc_info=True)
-            return jsonify(error=error_message), 500
-
-    elif event_type == 'invoice.payment_failed':
-        invoice = data
-        customer_id = invoice.get('customer')
-        subscription_id = invoice.get('subscription')
-        billing_reason = invoice.get('billing_reason')
-
-        # On failure, we just log it for now. We can add more robust handling later,
-        # like emailing the user.
-        current_app.logger.warning(f"Webhook: 'invoice.payment_failed' for subscription {subscription_id}, customer {customer_id}. Reason: {billing_reason}")
-
-    elif event_type == 'customer.subscription.deleted':
-        # Handles subscription cancellations at the end of the billing period
-        subscription = data
-        subscription_id = subscription.get('id')
-        customer_id = subscription.get('customer')
-
-        if not subscription_id:
-            return jsonify(status="error", message="No subscription id provided"), 400
-
-        if customer_id:
-            # We need user_id and created_at for the new period
-            user_res = supabase.table('user_subscriptions').select('id, user_id, display_name').eq('stripe_customer_id', customer_id).maybe_single().execute()
-
-            if user_res.data:
-                sub_id = user_res.data['id']
-                uid = user_res.data['user_id']
-                display_name = user_res.data['display_name']
-                
-                auth_user_res = supabase.auth.admin.get_user_by_id(uid)
-                if not auth_user_res.user:
-                    period_start = date.today().replace(day=1)
-                    period_end = period_start + relativedelta(months=1) - relativedelta(days=1)
-                else:
-                    period_start, period_end = get_anniversary_period(auth_user_res.user.created_at, date.today())
-                
-                period_start_dt = datetime.combine(period_start, datetime.min.time(), tzinfo=timezone.utc)
-
-                # Update main table
+                # Update the 'processing' subscription record with Stripe IDs
+                # Using admin client to bypass RLS as this is a system operation
                 update_payload = {
-                    'plan_id': 1, 'status': 'free', 'stripe_subscription_id': None,
-                    'stripe_customer_id': None, 'stripe_price_id': None,
-                    'current_period_start': period_start_dt.isoformat(),
-                    'current_period_end': str(period_end), 'next_billing_date': None,
+                    'stripe_customer_id': customer_id,
+                    'stripe_subscription_id': subscription_id,
+                    'display_name': display_name,
                     'updated_at': datetime.utcnow().isoformat()
                 }
-                supabase.table('user_subscriptions').update(update_payload).eq('id', sub_id).execute()
+                
+                res = supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
 
-                # Log to history table
+                if not res.data:
+                    error_message = f"Webhook 'checkout.session.completed' failed. Could not find a 'processing' user_subscription record for user_id: {user_id} to update."
+                    current_app.logger.error(error_message)
+                    return jsonify({"status": "error", "message": "User record not found"}), 500
+
+                current_app.logger.info(f"✅ Successfully updated subscription record for user {user_id[:8]}*** with Stripe IDs")
+                
+                # Log to subscription history for audit trail
+                updated_record = res.data[0]
                 history_payload = {
-                    'user_id': uid, 'display_name': display_name,
-                    'plan_id': 1, 'status': 'free',
-                    'started_at': period_start_dt.isoformat(),
+                    'user_id': user_id,
+                    'display_name': display_name,
+                    'plan_id': updated_record.get('plan_id'),
+                    'status': 'processing',
+                    'stripe_customer_id': customer_id,
+                    'stripe_subscription_id': subscription_id,
+                    'stripe_price_id': updated_record.get('stripe_price_id'),
+                    'started_at': updated_record.get('started_at')
                 }
                 supabase.table('subscription_histories').insert(history_payload).execute()
-                current_app.logger.info(f"Successfully logged 'free' (subscription deleted) history for user {uid}")
+                
+                return jsonify(success=True), 200
+                
+            except Exception as e:
+                current_app.logger.error(f"Error processing checkout.session.completed for user {user_id[:8]}***: {type(e).__name__}", exc_info=True)
+                return jsonify({"error": "Processing error"}), 500
 
-    return jsonify(success=True)
+        elif event_type == 'invoice.payment_succeeded':
+            invoice = data
+            subscription_id = invoice.get('subscription')
+            price_id = invoice.get('lines', {}).get('data', [{}])[0].get('price', {}).get('id')
+            
+            # SECURITY: Validate required fields
+            if not subscription_id or not isinstance(subscription_id, str):
+                current_app.logger.error("SECURITY ERROR: Invalid subscription_id in invoice.payment_succeeded")
+                return jsonify({"error": "Invalid subscription ID"}), 400
+
+            if not price_id:
+                current_app.logger.error("SECURITY ERROR: No price_id found in invoice.payment_succeeded")
+                return jsonify({"error": "Invalid price ID"}), 400
+
+            try:
+                # Find the user by stripe_subscription_id (using admin client)
+                user_res = supabase.table('user_subscriptions').select('user_id').eq('stripe_subscription_id', subscription_id).single().execute()
+                user_id = user_res.data['user_id']
+
+                # Find the corresponding internal plan using the Stripe price_id
+                plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
+                if not plan_res.data:
+                    error_message = f"Configuration Error: No plan found for stripe_price_id '{price_id}'. Payment cannot be processed for user {user_id[:8]}***."
+                    current_app.logger.error(error_message)
+                    return jsonify(error=error_message), 500
+                
+                new_plan_id = plan_res.data['id']
+                
+                # Get billing period dates from invoice
+                period_start_ts = invoice['period_start']
+                period_end_ts = invoice['period_end']
+                period_start = datetime.fromtimestamp(period_start_ts, tz=timezone.utc).date()
+                period_end = datetime.fromtimestamp(period_end_ts, tz=timezone.utc).date()
+                
+                # Update subscription to active status (using admin client)
+                update_payload = {
+                    'plan_id': new_plan_id,
+                    'status': 'active',
+                    'current_period_start': str(period_start),
+                    'current_period_end': str(period_end),
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                
+                res = supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
+                
+                if res.data:
+                    current_app.logger.info(f"✅ Successfully activated subscription for user {user_id[:8]}*** with plan {new_plan_id}")
+                    
+                    # Log to history
+                    updated_record = res.data[0]
+                    history_payload = {
+                        'user_id': user_id,
+                        'display_name': updated_record.get('display_name'),
+                        'plan_id': new_plan_id,
+                        'status': 'active',
+                        'stripe_customer_id': updated_record.get('stripe_customer_id'),
+                        'stripe_subscription_id': subscription_id,
+                        'stripe_price_id': price_id,
+                        'started_at': str(period_start),
+                        'next_billing_date': str(period_end)
+                    }
+                    supabase.table('subscription_histories').insert(history_payload).execute()
+                
+                return jsonify(success=True), 200
+                
+            except APIError as e:
+                if e.code == 'PGRST116':
+                    current_app.logger.warning(f"Webhook 'invoice.payment_succeeded' could not find subscription {subscription_id}. Race condition with 'checkout.session.completed'.")
+                    return jsonify(error="Subscription not processed yet, retry later"), 503
+                else:
+                    raise
+
+        elif event_type == 'customer.subscription.deleted':
+            subscription = data
+            subscription_id = subscription.get('id')
+            
+            if subscription_id:
+                try:
+                    # Find user and downgrade to free plan (using admin client)
+                    user_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
+                    
+                    if user_res.data:
+                        user_id = user_res.data['user_id']
+                        display_name = user_res.data['display_name']
+                        
+                        # Reset to free plan
+                        downgrade_payload = {
+                            'plan_id': 1,  # Free plan
+                            'status': 'free',
+                            'stripe_subscription_id': None,
+                            'updated_at': datetime.utcnow().isoformat()
+                        }
+                        
+                        supabase.table('user_subscriptions').update(downgrade_payload).eq('user_id', user_id).execute()
+                        
+                        # Log to history
+                        history_payload = {
+                            'user_id': user_id,
+                            'display_name': display_name,
+                            'plan_id': 1,
+                            'status': 'free'
+                        }
+                        supabase.table('subscription_histories').insert(history_payload).execute()
+                        
+                        current_app.logger.info(f"✅ Successfully downgraded user {user_id[:8]}*** to free plan")
+                        
+                except Exception as e:
+                    current_app.logger.error(f"Error processing subscription deletion: {type(e).__name__}", exc_info=True)
+
+        else:
+            # Log unknown event types for monitoring
+            current_app.logger.info(f"Unhandled webhook event type: {event_type}")
+            
+        return jsonify(success=True), 200
+            
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error processing webhook {event_type}: {type(e).__name__}", exc_info=True)
+        return jsonify({"error": "Processing error"}), 500
 
 @subscription_bp.route("/test-db-write", methods=["POST"])
 @require_authentication

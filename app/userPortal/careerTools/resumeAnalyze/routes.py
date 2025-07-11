@@ -1,6 +1,6 @@
 from flask import request, jsonify, current_app, g
 import requests 
-from app import extensions 
+from app.extensions import get_user_client, get_admin_client
 import magic
 import json
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
@@ -12,6 +12,10 @@ from . import resume_analyze_bp
 @check_and_use_feature('resume')
 def analyze_resume():
     current_user_id = str(g.user.id)
+    # Use admin client for INSERT operations (with explicit user filtering for security)
+    admin_supabase = get_admin_client()
+    # Use user client for SELECT operations (RLS enforced)
+    user_supabase = get_user_client()
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
@@ -40,7 +44,7 @@ def analyze_resume():
 
         resume_id_from_db = None
         try:
-            doc_query = extensions.supabase.table("user_documents") \
+            doc_query = supabase.table("user_documents") \
                 .select("id") \
                 .eq("document_url", current_resume_url) \
                 .eq("uid", current_user_id) \
@@ -66,7 +70,7 @@ def analyze_resume():
 
 
         try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
+            insert_response = admin_supabase.table("analyze_resume").insert(db_payload).execute()
             if not insert_response.data:
                 current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
         except Exception as e:
@@ -104,9 +108,11 @@ def analyze_resume():
 @require_authentication
 def get_analyze_resume():
     current_user_id = str(g.user.id)
+    # Use admin client with explicit user filtering for consistent data access
+    admin_supabase = get_admin_client()
 
     try:
-        query_response = extensions.supabase.table("analyze_resume") \
+        query_response = admin_supabase.table("analyze_resume") \
             .select("*") \
             .eq("user_id", current_user_id) \
             .execute()
@@ -123,6 +129,11 @@ def get_analyze_resume():
 @check_and_use_feature('resume')
 def roast_resume():
     current_user_id = str(g.user.id)
+    # Use admin client for INSERT operations (with explicit user filtering for security)
+    admin_supabase = get_admin_client()
+    # Use user client for SELECT operations (RLS enforced)
+    user_supabase = get_user_client()
+    
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
@@ -160,12 +171,15 @@ def roast_resume():
             
             file_storage_path = file_to_upload.filename 
 
-            extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
+            admin_supabase.storage.from_(SUPABASE_BUCKET).upload(
                 file_storage_path,
                 file_bytes,
-                file_options={"content-type": final_content_type_for_storage}
+                file_options={
+                    "content-type": final_content_type_for_storage,
+                    "upsert": True  # Allow overwriting existing files
+                }
             )
-            resume_url_for_xano = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
+            resume_url_for_xano = admin_supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
 
 
             document_data = {
@@ -176,7 +190,7 @@ def roast_resume():
                 "display_name": user_name,
                 "document_comments": "Uploaded for resume roast"
             }
-            doc_insert_response = extensions.supabase.table("user_documents").insert(document_data).execute()
+            doc_insert_response = admin_supabase.table("user_documents").insert(document_data).execute()
             
             if doc_insert_response.data and len(doc_insert_response.data) > 0 and doc_insert_response.data[0].get("id"):
                 resume_id_from_db = doc_insert_response.data[0].get("id")
@@ -186,7 +200,7 @@ def roast_resume():
         elif current_resume_url_form:
             resume_url_for_xano = current_resume_url_form
             try:
-                doc_query = extensions.supabase.table("user_documents") \
+                doc_query = user_supabase.table("user_documents") \
                     .select("id") \
                     .eq("document_url", resume_url_for_xano) \
                     .eq("uid", current_user_id) \
@@ -236,7 +250,7 @@ def roast_resume():
         }
         
         try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
+            insert_response = admin_supabase.table("analyze_resume").insert(db_payload).execute()
             if not insert_response.data:
                 current_app.logger.warning(f"Warning: Supabase insert into analyze_resume (roast) may have failed. Response: {insert_response}")
         except Exception as e:

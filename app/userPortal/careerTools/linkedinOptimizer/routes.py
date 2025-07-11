@@ -1,6 +1,6 @@
 from flask import request, jsonify, current_app, g
 import requests 
-from app import extensions 
+from app.extensions import get_user_client, get_admin_client
 import json
 import logging 
 from gotrue.errors import AuthApiError
@@ -13,10 +13,12 @@ from . import linkedin_optimizer_bp
 @require_authentication
 def get_linkedin_optimizer_history():
     current_user_id = str(g.user.id)
+    # Use admin client with explicit user filtering for consistent data access
+    admin_supabase = get_admin_client()
 
     try:
         query_response = (
-            extensions.supabase.table("linkedin_optimizer")
+            admin_supabase.table("linkedin_optimizer")
             .select("*")
             .eq("uid", current_user_id)
             .order('created_at', desc=True)
@@ -32,6 +34,8 @@ def get_linkedin_optimizer_history():
 @check_and_use_feature('linkedin_optimize')
 def create_linkedin_optimization():
     current_user_id = str(g.user.id)
+    # Use admin client for INSERT operations (with explicit user filtering for security)
+    admin_supabase = get_admin_client()
     XANO_API_URL_LINKEDIN_OPTIMIZER = current_app.config.get("XANO_API_URL_LINKEDIN_OPTIMIZER")
     
     data = request.get_json()
@@ -80,7 +84,7 @@ def create_linkedin_optimization():
             "api_response": api_data 
         }
         
-        result = extensions.supabase.table("linkedin_optimizer").insert(insert_data).execute()
+        result = admin_supabase.table("linkedin_optimizer").insert(insert_data).execute()
 
         if not result.data and not (hasattr(result, 'status_code') and 200 <= result.status_code < 300) : # Check for successful insert, some clients might not return data on success
              print(f"Supabase insert failed or returned no data. Result: {result}")
@@ -127,8 +131,5 @@ def create_linkedin_optimization():
         error_str = str(e)
         print(f"Error processing linkedin optimization POST request: {error_str}")
         return jsonify({"error": f"An unexpected error occurred: {error_str}"}), 500
-
-# Remove the old combined route if it exists or comment it out.
-# For this edit, we are replacing the entire file content, so the old route will be gone.
 
         

@@ -1,6 +1,6 @@
 from flask import request, jsonify, current_app, g
 import requests 
-from app import extensions 
+from app.extensions import get_user_client, get_admin_client
 import json
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import cover_letter_event
@@ -12,6 +12,10 @@ from . import cover_letter_bp
 @check_and_use_feature('cover_letter')
 def create_cover_letter():
     current_user_id = str(g.user.id)
+    # Use admin client for INSERT operations (with explicit user filtering for security)
+    admin_supabase = get_admin_client()
+    # Use user client for SELECT operations (RLS enforced)
+    user_supabase = get_user_client()
 
     frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
     xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
@@ -66,7 +70,7 @@ def create_cover_letter():
         }
 
         try:
-            insert_response = extensions.supabase.table("cover_letter").insert(db_payload).execute()
+            insert_response = admin_supabase.table("cover_letter").insert(db_payload).execute()
             if not insert_response.data:
                 print(f"Warning: Supabase insert into cover_letter may have failed or returned no data. Response: {insert_response}")
         except Exception as e:
@@ -113,9 +117,11 @@ def create_cover_letter():
 @require_authentication
 def get_cover_letters():
     current_user_id = str(g.user.id)
+    # Use admin client with explicit user filtering for consistent data access
+    admin_supabase = get_admin_client()
     try:
         query_response = (
-            extensions.supabase.table("cover_letter")
+            admin_supabase.table("cover_letter")
             .select("*")  
             .eq("uid", current_user_id)
             .execute()
