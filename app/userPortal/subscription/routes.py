@@ -408,6 +408,9 @@ def stripe_webhook():
 
             try:
                 user_id = user_res.data['user_id']
+            except (KeyError, TypeError) as e:
+                current_app.logger.error(f"Webhook 'invoice.payment_succeeded' could not extract user_id from subscription {subscription_id}. Error: {e}")
+                return jsonify(error="Invalid subscription data"), 400
 
             # Find the corresponding internal plan in our database using the Stripe price_id from the invoice.
             # This is the correct, database-driven way to link a Stripe payment to an internal plan.
@@ -768,19 +771,19 @@ def stripe_webhook():
                     usage_record = usage_res.data if usage_res else None
                     today = date.today()
                     
-                                    if usage_record and usage_record.get('period_end'):
-                    # Check if the usage record is for the current period (not expired)
-                    usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
-                    is_current_period = today <= usage_period_end
-                    
-                    if is_current_period and usage_record.get('plan_id') != 1:
-                        # Update existing current period record to free plan
-                        supabase.table('feature_usage') \
-                            .update({'plan_id': 1}) \
-                            .eq('user_id', uid) \
-                            .eq('period_start', usage_record['period_start']) \
-                            .execute()
-                        current_app.logger.info(f"Webhook (subscription.deleted): Updated feature_usage plan_id from {usage_record.get('plan_id')} to 1 (free) for user {uid}")
+                    if usage_record and usage_record.get('period_end'):
+                        # Check if the usage record is for the current period (not expired)
+                        usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
+                        is_current_period = today <= usage_period_end
+                        
+                        if is_current_period and usage_record.get('plan_id') != 1:
+                            # Update existing current period record to free plan
+                            supabase.table('feature_usage') \
+                                .update({'plan_id': 1}) \
+                                .eq('user_id', uid) \
+                                .eq('period_start', usage_record['period_start']) \
+                                .execute()
+                            current_app.logger.info(f"Webhook (subscription.deleted): Updated feature_usage plan_id from {usage_record.get('plan_id')} to 1 (free) for user {uid}")
                         elif not is_current_period:
                             # Period expired, create new record for current period with free plan
                             new_usage_payload = {
