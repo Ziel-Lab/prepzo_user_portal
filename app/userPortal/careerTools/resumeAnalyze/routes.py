@@ -4,6 +4,7 @@ from app import extensions
 import magic
 import json
 import logging
+import time
 from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import resume_analyze_event
@@ -178,12 +179,14 @@ def roast_resume():
                 except Exception as e:
                     logging.warning(f"Roast Resume: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
             
-            file_storage_path = file_to_upload.filename 
+            # Create unique file path with timestamp for versioning
+            timestamp = str(int(time.time()))
+            file_storage_path = f"{current_user_id}/{timestamp}_{file_to_upload.filename}"
 
             extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
                 file_storage_path,
                 file_bytes,
-                file_options={"content-type": final_content_type_for_storage, "upsert": True}
+                file_options={"content-type": final_content_type_for_storage}
             )
             resume_url_for_xano = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
 

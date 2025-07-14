@@ -76,7 +76,7 @@ def upload_document():
         extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
             storage_file_path,  # Use the unique path for storage
             file_bytes,
-            file_options={"content-type": final_content_type_for_storage, "upsert": True}
+            file_options={"content-type": final_content_type_for_storage}
         )
         public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path) # Get URL based on unique path
 
