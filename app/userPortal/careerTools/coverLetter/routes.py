@@ -2,10 +2,33 @@ from flask import request, jsonify, current_app, g
 import requests 
 from app import extensions 
 import json
+from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import cover_letter_event
 
 from . import cover_letter_bp 
+
+def background_db_and_analytics(db_payload, amplitude_payload=None):
+    """Fire-and-forget background processing for DB inserts and analytics"""
+    try:
+        insert_response = extensions.supabase.table("cover_letter").insert(db_payload).execute()
+        if not insert_response.data:
+            current_app.logger.warning(f"Warning: Supabase insert into cover_letter may have failed or returned no data. Response: {insert_response}")
+    except Exception as e:
+        current_app.logger.error(f"Background DB insert failed: {str(e)}")
+    
+    if amplitude_payload:
+        try:
+            cover_letter_event(**amplitude_payload)
+            current_app.logger.info("Cover letter Amplitude event sent successfully.")
+        except Exception as e:
+            current_app.logger.warning(f"Background Amplitude event failed: {e}")
+
+def get_request_data():
+    """Unified request data handling for both JSON and form data"""
+    if request.is_json:
+        return request.get_json() or {}
+    return request.form.to_dict()
 
 @cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
 @require_authentication
@@ -17,7 +40,7 @@ def create_cover_letter():
     xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
 
     try:
-        data = request.form
+        data = get_request_data()
         current_resume_url = data.get("current_resume")
         job_description_text = data.get("job_description")
         company_website_text = data.get("company_website")
@@ -33,7 +56,8 @@ def create_cover_letter():
             "additional_comments": user_additional_comments_text
         }
 
-        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload)
+        # Reduce timeout for better reliability
+        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload, timeout=60)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
@@ -54,8 +78,6 @@ def create_cover_letter():
             print(f"Cover Letter: Xano 'feedback' key missing in response.")
             parsed_feedback_from_xano = {"error": "Feedback key missing in Xano response"}
 
-
-
         db_payload = {
             "uid": current_user_id,
             "job_description": job_description_text,
@@ -65,26 +87,23 @@ def create_cover_letter():
             "feedback": parsed_feedback_from_xano 
         }
 
-        try:
-            insert_response = extensions.supabase.table("cover_letter").insert(db_payload).execute()
-            if not insert_response.data:
-                print(f"Warning: Supabase insert into cover_letter may have failed or returned no data. Response: {insert_response}")
-        except Exception as e:
-            print(f"Error inserting into cover_letter table: {str(e)}")
+        amplitude_payload = {
+            "user_uuid": current_user_id,
+            "company_url": company_website_text,           
+            "original_resume_url": current_resume_url,             
+            "cover_letter": xano_data.get("cover_letter"),              
+            "additional_comments": user_additional_comments_text,  
+            "feedback": parsed_feedback_from_xano       
+        }
 
-        # Send the event to Amplitude
-        try:
-            cover_letter_event(
-            current_user_id,
-            company_website_text,           
-            current_resume_url,             
-            xano_data.get("cover_letter"),              
-            user_additional_comments_text,  
-            parsed_feedback_from_xano       
-        )
-        except Exception as e:
-            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
+        # Fire-and-forget background processing
+        Thread(
+            target=background_db_and_analytics, 
+            args=(db_payload, amplitude_payload), 
+            daemon=True
+        ).start()
 
+        # Return immediately after Xano success
         if parsed_feedback_from_xano and "error" not in parsed_feedback_from_xano:
             return jsonify(parsed_feedback_from_xano), 200
         else: 
@@ -94,7 +113,6 @@ def create_cover_letter():
                             "details": error_detail_for_client,
                             "full_xano_response_preview": xano_data if 'feedback' not in xano_data else {k:v for k,v in xano_data.items() if k != 'feedback'}
                            }), 207
-
 
     except requests.exceptions.HTTPError as http_err:
         try:

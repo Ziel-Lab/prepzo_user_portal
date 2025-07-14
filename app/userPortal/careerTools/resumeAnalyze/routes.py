@@ -3,9 +3,32 @@ import requests
 from app import extensions 
 import magic
 import json
+from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import resume_analyze_event
 from . import resume_analyze_bp 
+
+def background_db_and_analytics(db_payload, amplitude_payload=None):
+    """Fire-and-forget background processing for DB inserts and analytics"""
+    try:
+        insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
+        if not insert_response.data:
+            current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
+    except Exception as e:
+        current_app.logger.error(f"Background DB insert failed: {str(e)}")
+    
+    if amplitude_payload:
+        try:
+            resume_analyze_event(**amplitude_payload)
+            current_app.logger.info("Amplitude event sent successfully.")
+        except Exception as e:
+            current_app.logger.warning(f"Background Amplitude event failed: {e}")
+
+def get_request_data():
+    """Unified request data handling for both JSON and form data"""
+    if request.is_json:
+        return request.get_json() or {}
+    return request.form.to_dict()
 
 @resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
 @require_authentication
@@ -18,7 +41,7 @@ def analyze_resume():
     xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
     
     try:
-        data = request.form
+        data = get_request_data()
         current_resume_url = data.get("current_resume") 
         job_description = data.get("job_description")
         company_website = data.get("company_website")
@@ -34,10 +57,12 @@ def analyze_resume():
             "additional_comments": additional_comment_text
         }
 
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=180)
+        # Reduce timeout to be safely under typical WSGI timeouts
+        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=60)
         xano_response.raise_for_status()
         xano_data = xano_response.json() 
 
+        # Prepare background tasks but don't block on them
         resume_id_from_db = None
         try:
             doc_query = extensions.supabase.table("user_documents") \
@@ -48,10 +73,8 @@ def analyze_resume():
                 .execute()
             if doc_query.data and doc_query.data.get("id"):
                 resume_id_from_db = doc_query.data.get("id")
-            else:
-                current_app.logger.warning(f"Warning: Could not find resume_id for URL: {current_resume_url} and user: {current_user_id}")
         except Exception as e:
-            current_app.logger.error(f"Error querying for resume_id: {str(e)}")
+            current_app.logger.error(f"Error querying for resume_id (background will handle): {str(e)}")
            
         db_payload = {
             "user_id": current_user_id,
@@ -64,28 +87,24 @@ def analyze_resume():
             "resume_id": resume_id_from_db 
         }
 
+        amplitude_payload = {
+            "user_uuid": current_user_id,
+            "company_url": company_website,
+            "original_resume_url": current_resume_url,
+            "score": xano_data.get("score"),
+            "improved_score": xano_data.get("improved_score"),
+            "feedback": xano_data.get("feedback"),
+            "new_resume_url": xano_data.get("new_resume_url")
+        }
 
-        try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-            if not insert_response.data:
-                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
-        except Exception as e:
-            current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
+        # Fire-and-forget background processing
+        Thread(
+            target=background_db_and_analytics, 
+            args=(db_payload, amplitude_payload), 
+            daemon=True
+        ).start()
         
-        try:
-            resume_analyze_event(
-                user_uuid=current_user_id,
-                company_url=company_website,
-                original_resume_url=current_resume_url,
-                score=xano_data.get("score"),
-                improved_score=xano_data.get("improved_score"),
-                feedback=xano_data.get("feedback"),
-                new_resume_url=xano_data.get("new_resume_url")
-            )
-            current_app.logger.info("Amplitude event sent successfully.")
-        except Exception as e:
-            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
-        
+        # Return immediately after Xano success
         return jsonify(xano_data), xano_response.status_code
 
     except requests.exceptions.HTTPError as http_err:
@@ -163,7 +182,7 @@ def roast_resume():
             extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
                 file_storage_path,
                 file_bytes,
-                file_options={"content-type": final_content_type_for_storage}
+                file_options={"content-type": final_content_type_for_storage, "upsert": True}
             )
             resume_url_for_xano = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
 
@@ -205,7 +224,8 @@ def roast_resume():
              return jsonify({"error": "Failed to determine resume URL for processing"}), 500
 
         xano_payload = {"current_resume": resume_url_for_xano}
-        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload, timeout=180)
+        # Reduce timeout for better reliability
+        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload, timeout=60)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
@@ -235,13 +255,14 @@ def roast_resume():
             "resume_id": resume_id_from_db
         }
         
-        try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-            if not insert_response.data:
-                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume (roast) may have failed. Response: {insert_response}")
-        except Exception as e:
-            current_app.logger.error(f"Error inserting into analyze_resume table (roast): {str(e)}")
+        # Fire-and-forget background processing for DB insert
+        Thread(
+            target=background_db_and_analytics, 
+            args=(db_payload,), 
+            daemon=True
+        ).start()
 
+        # Return immediately after Xano success
         return jsonify(xano_data), xano_response.status_code
 
     except requests.exceptions.HTTPError as http_err:
