@@ -57,8 +57,8 @@ def create_cover_letter():
             "additional_comments": user_additional_comments_text
         }
 
-        # Reduce timeout for better reliability
-        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload, timeout=60)
+        # Increase timeout for better reliability
+        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload, timeout=200)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 

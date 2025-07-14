@@ -59,8 +59,8 @@ def analyze_resume():
             "additional_comments": additional_comment_text
         }
 
-        # Reduce timeout to be safely under typical WSGI timeouts
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=60)
+        # Increase timeout and add better error handling
+        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=200)
         xano_response.raise_for_status()
         xano_data = xano_response.json() 
 
@@ -109,6 +109,9 @@ def analyze_resume():
         # Return immediately after Xano success
         return jsonify(xano_data), xano_response.status_code
 
+    except requests.exceptions.Timeout:
+        logging.error("Resume analysis request timed out")
+        return jsonify({"error": "The resume analysis service is taking too long to respond. Please try again later."}), 504
     except requests.exceptions.HTTPError as http_err:
         try:
             error_detail = http_err.response.json()
@@ -116,6 +119,7 @@ def analyze_resume():
             error_detail = str(http_err)
         return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
+        logging.error(f"Request to Xano API failed: {str(req_err)}")
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
         logging.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
@@ -228,8 +232,8 @@ def roast_resume():
              return jsonify({"error": "Failed to determine resume URL for processing"}), 500
 
         xano_payload = {"current_resume": resume_url_for_xano}
-        # Reduce timeout for better reliability
-        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload, timeout=60)
+        # Increase timeout for better reliability  
+        xano_response = requests.post(xano_api_url_resume_roast, json=xano_payload, timeout=200)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 
@@ -269,6 +273,9 @@ def roast_resume():
         # Return immediately after Xano success
         return jsonify(xano_data), xano_response.status_code
 
+    except requests.exceptions.Timeout:
+        logging.error("Resume roast request timed out")
+        return jsonify({"error": "The resume roast service is taking too long to respond. Please try again later."}), 504
     except requests.exceptions.HTTPError as http_err:
         try:
             error_detail = http_err.response.json()
@@ -276,6 +283,7 @@ def roast_resume():
             error_detail = str(http_err.response.text)
         return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
+        logging.error(f"Request to Xano API failed: {str(req_err)}")
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
         logging.error(f"Unexpected error in roast_resume: {str(e)}")

@@ -73,8 +73,8 @@ def create_linkedin_optimization():
         xano_payload = {"linkedin_url": linkedin_url, "comments": comments}
         logging.info(f"Sending payload to Xano: {json.dumps(xano_payload)}") 
 
-        # Reduce timeout for better reliability  
-        xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload, timeout=60) 
+        # Increase timeout for better reliability  
+        xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload, timeout=200) 
         xano_response.raise_for_status() 
         
         # The new Xano response is a clean JSON object with 'changes' and 'explanation' keys.
