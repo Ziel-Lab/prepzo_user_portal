@@ -80,6 +80,14 @@ def upload_document():
         )
         public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path) # Get URL based on unique path
 
+        # Check if document with same name already exists for this user
+        existing_doc_check = extensions.supabase.table("user_documents") \
+            .select("id") \
+            .eq("uid", current_user_id) \
+            .eq("document_name", file.filename) \
+            .maybe_single() \
+            .execute()
+
         document_data = {
             "uid": current_user_id,
             "document_name": file.filename,  # Store original filename for display
@@ -88,6 +96,10 @@ def upload_document():
             "display_name": user_display_name,
             "document_comments": document_comments
         }
+
+        # Only add status if this is a replacement file
+        if existing_doc_check.data:
+            document_data["status"] = "Updated"
 
         data, _ = extensions.supabase.table("user_documents").insert(document_data).execute()
         return jsonify({"message": "File uploaded", "file_url": public_url, "db_response": data}), 201
