@@ -81,12 +81,17 @@ def upload_document():
         public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path) # Get URL based on unique path
 
         # Check if document with same name already exists for this user
-        existing_doc_check = extensions.supabase.table("user_documents") \
-            .select("id") \
-            .eq("uid", current_user_id) \
-            .eq("document_name", file.filename) \
-            .maybe_single() \
-            .execute()
+        try:
+            existing_doc_check = extensions.supabase.table("user_documents") \
+                .select("id") \
+                .eq("uid", current_user_id) \
+                .eq("document_name", file.filename) \
+                .execute()
+            
+            has_existing_file = existing_doc_check.data and len(existing_doc_check.data) > 0
+        except Exception as e:
+            # If query fails, assume no existing file
+            has_existing_file = False
 
         document_data = {
             "uid": current_user_id,
@@ -98,7 +103,7 @@ def upload_document():
         }
 
         # Only add status if this is a replacement file
-        if existing_doc_check.data:
+        if has_existing_file:
             document_data["status"] = "Updated"
 
         data, _ = extensions.supabase.table("user_documents").insert(document_data).execute()
