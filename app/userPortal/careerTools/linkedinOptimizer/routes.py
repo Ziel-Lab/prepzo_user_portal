@@ -3,11 +3,34 @@ import requests
 from app.extensions import get_user_client, get_admin_client
 import json
 import logging 
+from threading import Thread
 from gotrue.errors import AuthApiError
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import linkedin_optimizer_event
 
 from . import linkedin_optimizer_bp
+
+def background_db_and_analytics(db_payload, amplitude_payload=None):
+    """Fire-and-forget background processing for DB inserts and analytics"""
+    try:
+        result = extensions.supabase.table("linkedin_optimizer").insert(db_payload).execute()
+        if not result.data and not (hasattr(result, 'status_code') and 200 <= result.status_code < 300):
+            current_app.logger.warning(f"Background Supabase insert failed or returned no data. Result: {result}")
+    except Exception as e:
+        current_app.logger.error(f"Background DB insert failed: {str(e)}")
+    
+    if amplitude_payload:
+        try:
+            linkedin_optimizer_event(**amplitude_payload)
+            current_app.logger.info("LinkedIn optimizer Amplitude event sent successfully.")
+        except Exception as e:
+            current_app.logger.warning(f"Background Amplitude event failed: {e}")
+
+def get_request_data():
+    """Unified request data handling for both JSON and form data"""
+    if request.is_json:
+        return request.get_json() or {}
+    return request.form.to_dict()
 
 @linkedin_optimizer_bp.route("/linkedin-optimizer/history", methods=["GET", "OPTIONS"])
 @require_authentication
@@ -38,9 +61,9 @@ def create_linkedin_optimization():
     admin_supabase = get_admin_client()
     XANO_API_URL_LINKEDIN_OPTIMIZER = current_app.config.get("XANO_API_URL_LINKEDIN_OPTIMIZER")
     
-    data = request.get_json()
+    data = get_request_data()
     if not data:
-        return jsonify({"error": "Invalid JSON payload"}), 400
+        return jsonify({"error": "Invalid or missing payload"}), 400
 
     linkedin_url = data.get("linkedin_url")
     comments = data.get("comments")
@@ -54,7 +77,8 @@ def create_linkedin_optimization():
         xano_payload = {"linkedin_url": linkedin_url, "comments": comments}
         logging.info(f"Sending payload to Xano: {json.dumps(xano_payload)}") 
 
-        xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload) 
+        # Reduce timeout for better reliability  
+        xano_response = requests.post(XANO_API_URL_LINKEDIN_OPTIMIZER, json=xano_payload, timeout=60) 
         xano_response.raise_for_status() 
         
         # The new Xano response is a clean JSON object with 'changes' and 'explanation' keys.
@@ -84,29 +108,22 @@ def create_linkedin_optimization():
             "api_response": api_data 
         }
         
-        result = admin_supabase.table("linkedin_optimizer").insert(insert_data).execute()
+        amplitude_payload = {
+            "user_uuid": current_user_id,
+            "linkedin_url": linkedin_url,
+            "goals": comments,
+            "feedback": api_data
+        }
 
-        if not result.data and not (hasattr(result, 'status_code') and 200 <= result.status_code < 300) : # Check for successful insert, some clients might not return data on success
-             print(f"Supabase insert failed or returned no data. Result: {result}")
-             error_detail = "Unknown error during Supabase insert."
-             if hasattr(result, 'error') and result.error:
-                 error_detail = str(result.error.message if hasattr(result.error, 'message') else result.error)
-             elif hasattr(result, 'message') and result.message:
-                 error_detail = result.message
-             return jsonify({"error": f"Failed to save linkedin optimization data: {error_detail}"}), 500
-        
-        # Send the event to Amplitude
-        try:
-            linkedin_optimizer_event(
-                user_uuid=current_user_id,
-                linkedin_url=linkedin_url,
-                goals=comments,
-                feedback=api_data
-            )
-        except Exception as e:
-            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
+        # Fire-and-forget background processing
+        Thread(
+            target=background_db_and_analytics, 
+            args=(insert_data, amplitude_payload), 
+            daemon=True
+        ).start()
 
-        return jsonify(api_data), 200 # Return Xano's response
+        # Return immediately after Xano success
+        return jsonify(api_data), 200
 
     except requests.exceptions.HTTPError as http_err:
         error_message = f"Error from optimization service (HTTP {http_err.response.status_code})"
