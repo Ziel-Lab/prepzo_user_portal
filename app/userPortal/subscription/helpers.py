@@ -199,7 +199,7 @@ def check_and_use_feature(feature_name, increment_by=1):
                 
                 # Step 4: Check if the period is expired or if no record exists.
                 today = date.today()
-                is_expired = usage_record and today > datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
+                is_expired = usage_record and usage_record.get('period_end') and today > datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
                 
                 if not usage_record or is_expired:
                     if is_expired:
