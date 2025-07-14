@@ -3,6 +3,7 @@ import requests
 from app import extensions 
 import magic
 import json
+import logging
 from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import resume_analyze_event
@@ -13,16 +14,16 @@ def background_db_and_analytics(db_payload, amplitude_payload=None):
     try:
         insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
         if not insert_response.data:
-            current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
+            logging.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
     except Exception as e:
-        current_app.logger.error(f"Background DB insert failed: {str(e)}")
+        logging.error(f"Background DB insert failed: {str(e)}")
     
     if amplitude_payload:
         try:
             resume_analyze_event(**amplitude_payload)
-            current_app.logger.info("Amplitude event sent successfully.")
+            logging.info("Amplitude event sent successfully.")
         except Exception as e:
-            current_app.logger.warning(f"Background Amplitude event failed: {e}")
+            logging.warning(f"Background Amplitude event failed: {e}")
 
 def get_request_data():
     """Unified request data handling for both JSON and form data"""
@@ -74,7 +75,7 @@ def analyze_resume():
             if doc_query.data and doc_query.data.get("id"):
                 resume_id_from_db = doc_query.data.get("id")
         except Exception as e:
-            current_app.logger.error(f"Error querying for resume_id (background will handle): {str(e)}")
+            logging.error(f"Error querying for resume_id (background will handle): {str(e)}")
            
         db_payload = {
             "user_id": current_user_id,
@@ -116,7 +117,7 @@ def analyze_resume():
     except requests.exceptions.RequestException as req_err:
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
-        current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
+        logging.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
 
 @resume_analyze_bp.route("/get-analyze-resume", methods=["GET", "OPTIONS"])
@@ -133,7 +134,7 @@ def get_analyze_resume():
         return jsonify(query_response.data or []), 200
         
     except Exception as e:
-        current_app.logger.error(f"Error fetching from analyze_resume table: {str(e)}")
+        logging.error(f"Error fetching from analyze_resume table: {str(e)}")
         return jsonify({"error": f"Could not retrieve analyzed resume data: {str(e)}"}), 500
         
 
@@ -175,7 +176,7 @@ def roast_resume():
                     magic_mimetype = magic.from_buffer(file_bytes, mime=True)
                     final_content_type_for_storage = magic_mimetype
                 except Exception as e:
-                    current_app.logger.warning(f"Roast Resume: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
+                    logging.warning(f"Roast Resume: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
             
             file_storage_path = file_to_upload.filename 
 
@@ -200,7 +201,7 @@ def roast_resume():
             if doc_insert_response.data and len(doc_insert_response.data) > 0 and doc_insert_response.data[0].get("id"):
                 resume_id_from_db = doc_insert_response.data[0].get("id")
             else:
-                current_app.logger.warning(f"Warning: Could not get ID from user_documents insert for {resume_url_for_xano}. Response: {doc_insert_response}")
+                logging.warning(f"Warning: Could not get ID from user_documents insert for {resume_url_for_xano}. Response: {doc_insert_response}")
 
         elif current_resume_url_form:
             resume_url_for_xano = current_resume_url_form
@@ -214,9 +215,9 @@ def roast_resume():
                 if doc_query.data and doc_query.data.get("id"):
                     resume_id_from_db = doc_query.data.get("id")
                 else:
-                    current_app.logger.warning(f"Warning: Could not find resume_id for existing URL: {resume_url_for_xano} and user: {current_user_id}")
+                    logging.warning(f"Warning: Could not find resume_id for existing URL: {resume_url_for_xano} and user: {current_user_id}")
             except Exception as e:
-                current_app.logger.error(f"Error querying for resume_id for existing URL: {str(e)}")
+                logging.error(f"Error querying for resume_id for existing URL: {str(e)}")
         else:
             return jsonify({"error": "Missing resume input: provide 'current_resume_url' (form data) or upload a 'file' (multipart)"}), 400
 
@@ -237,12 +238,12 @@ def roast_resume():
                 parsed_inner_json = json.loads(raw_feedback_payload)
                 feedback_content_for_db = parsed_inner_json
             except json.JSONDecodeError as e:
-                current_app.logger.warning(f"Roast Resume: Error decoding JSON string from 'feedback' key: {e}. Storing raw Xano response object instead.")
+                logging.warning(f"Roast Resume: Error decoding JSON string from 'feedback' key: {e}. Storing raw Xano response object instead.")
             except TypeError: 
-                current_app.logger.warning(f"Roast Resume: Value for 'feedback' key was not a string (TypeError). Storing raw Xano response object.")
+                logging.warning(f"Roast Resume: Value for 'feedback' key was not a string (TypeError). Storing raw Xano response object.")
 
         elif raw_feedback_payload is not None: 
-            current_app.logger.warning(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
+            logging.warning(f"Roast Resume: 'feedback' key present but not a string. Using raw Xano response for feedback_analysis. Type: {type(raw_feedback_payload)}")
 
         db_payload = {
             "user_id": current_user_id,
@@ -274,5 +275,5 @@ def roast_resume():
     except requests.exceptions.RequestException as req_err:
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
-        current_app.logger.error(f"Unexpected error in roast_resume: {str(e)}")
+        logging.error(f"Unexpected error in roast_resume: {str(e)}")
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500

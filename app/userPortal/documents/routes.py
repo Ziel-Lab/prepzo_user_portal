@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 import os
 import magic
+import time
 from app import extensions
 from . import upload_bp 
 
@@ -65,8 +66,9 @@ def upload_document():
             print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
 
 
-    # Construct a unique path in storage using user ID and original filename
-    storage_file_path = f"{current_user_id}/{file.filename}"
+    # Construct a unique path in storage using user ID, timestamp, and original filename
+    timestamp = str(int(time.time()))
+    storage_file_path = f"{current_user_id}/{timestamp}_{file.filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
 
@@ -74,10 +76,7 @@ def upload_document():
         extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
             storage_file_path,  # Use the unique path for storage
             file_bytes,
-            file_options={
-                "content-type": final_content_type_for_storage,
-                "content-disposition": f'inline; filename="{file.filename}"'
-            }
+            file_options={"content-type": final_content_type_for_storage, "upsert": True}
         )
         public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path) # Get URL based on unique path
 

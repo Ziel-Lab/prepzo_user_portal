@@ -15,16 +15,16 @@ def background_db_and_analytics(db_payload, amplitude_payload=None):
     try:
         result = extensions.supabase.table("linkedin_optimizer").insert(db_payload).execute()
         if not result.data and not (hasattr(result, 'status_code') and 200 <= result.status_code < 300):
-            current_app.logger.warning(f"Background Supabase insert failed or returned no data. Result: {result}")
+            logging.warning(f"Background Supabase insert failed or returned no data. Result: {result}")
     except Exception as e:
-        current_app.logger.error(f"Background DB insert failed: {str(e)}")
+        logging.error(f"Background DB insert failed: {str(e)}")
     
     if amplitude_payload:
         try:
             linkedin_optimizer_event(**amplitude_payload)
-            current_app.logger.info("LinkedIn optimizer Amplitude event sent successfully.")
+            logging.info("LinkedIn optimizer Amplitude event sent successfully.")
         except Exception as e:
-            current_app.logger.warning(f"Background Amplitude event failed: {e}")
+            logging.warning(f"Background Amplitude event failed: {e}")
 
 def get_request_data():
     """Unified request data handling for both JSON and form data"""
