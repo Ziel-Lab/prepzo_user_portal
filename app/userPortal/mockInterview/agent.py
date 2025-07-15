@@ -20,17 +20,22 @@ except ImportError:
 # Handle relative imports
 try:
     from .prompt import get_interview_prompt, get_closing_prompt, get_enhanced_interview_prompt
+    from .function import INTERVIEW_TOOLS, get_user_interview_context
 except ImportError:
     try:
         from prompt import get_interview_prompt, get_closing_prompt, get_enhanced_interview_prompt
+        from function import INTERVIEW_TOOLS, get_user_interview_context
     except ImportError:
-        # Define minimal fallbacks if prompt module not available
+        # Define minimal fallbacks if modules not available
         def get_interview_prompt(*args, **kwargs):
             return "You are a professional interviewer conducting a mock interview."
         def get_closing_prompt():
             return "Thank you for the interview. Please provide closing feedback."
         def get_enhanced_interview_prompt(context):
             return f"You are interviewing for {context.get('position', 'a position')}. Conduct a professional interview."
+        INTERVIEW_TOOLS = []
+        async def get_user_interview_context(user_id, session_id=None):
+            return {"user_id": user_id, "session_id": session_id}
 
 # Configure logging for production
 logging.basicConfig(
@@ -246,9 +251,24 @@ class InterviewAssistant(Agent):
             "Start the interview by greeting the participant warmly and asking them to introduce themselves. "
             "Keep your initial greeting brief and natural. "
         )
+        
+        # Add context information if resume/job description available
+        if interview_context.get('has_resume') or interview_context.get('has_job_description'):
+            context_instruction = "\n\nCONTEXT INFORMATION:\n"
+            if interview_context.get('has_resume'):
+                context_instruction += f"- Resume available: {interview_context.get('resume_text', 'Content not loaded')[:200]}...\n"
+            if interview_context.get('has_job_description'):
+                context_instruction += f"- Job description available: {interview_context.get('job_description', 'Content not loaded')[:200]}...\n"
+            context_instruction += "\nUse this information to ask relevant, personalized questions.\n\n"
+            instructions = context_instruction + instructions
+        
         instructions = greeting_instruction + instructions
         
-        super().__init__(instructions=instructions)
+        # Initialize agent with tools for resume/job description access
+        super().__init__(
+            instructions=instructions,
+            tools=INTERVIEW_TOOLS if LIVEKIT_AGENTS_AVAILABLE else []
+        )
         self.session_state = session_state
 
 async def entrypoint(ctx: agents.JobContext):
@@ -269,6 +289,31 @@ async def entrypoint(ctx: agents.JobContext):
     
     # Get interview configuration
     interview_config = await get_interview_config(ctx.room.name)
+    
+    # Load user's resume and job description context if user_id is available
+    user_id = interview_config.get('user_id')
+    session_id = interview_config.get('session_id')
+    
+    if user_id:
+        logger.info(f"Loading interview context for user: {user_id}")
+        try:
+            # Load user's documents (resume, job description)
+            user_context = await get_user_interview_context(user_id, session_id)
+            
+            if 'error' not in user_context:
+                # Merge user context into interview config
+                interview_config['interview_context'] = user_context
+                logger.info(f"Loaded context - Resume: {user_context.get('has_resume', False)}, "
+                          f"Job Description: {user_context.get('has_job_description', False)}")
+            else:
+                logger.warning(f"Failed to load user context: {user_context.get('error')}")
+                interview_config['interview_context'] = {}
+        except Exception as e:
+            logger.error(f"Error loading user interview context: {e}")
+            interview_config['interview_context'] = {}
+    else:
+        logger.info("No user_id provided, proceeding with general interview")
+        interview_config['interview_context'] = {}
     
     # Initialize interview session state
     session_state = InterviewSessionState(interview_config)
@@ -388,12 +433,26 @@ async def get_interview_config(room_name: str) -> Dict[str, Any]:
     """Get interview configuration for the room"""
     # Check if we have a pre-stored configuration
     if room_name in interview_sessions:
-        return interview_sessions[room_name].interview_config
+        stored_config = interview_sessions[room_name].interview_config
+        logger.info(f"Found stored config for room {room_name}")
+        return stored_config
     
-    # Return default configuration
-    return {
-        'session_id': room_name,
+    # Try to extract user_id from room_name if it follows a pattern like "interview_userid_sessionid"
+    user_id = None
+    session_id = room_name
+    
+    if room_name.startswith('interview_'):
+        parts = room_name.split('_')
+        if len(parts) >= 3:
+            user_id = parts[1]
+            session_id = '_'.join(parts[2:])
+            logger.info(f"Extracted user_id: {user_id}, session_id: {session_id} from room_name: {room_name}")
+    
+    # Return configuration with extracted user_id
+    config = {
+        'session_id': session_id,
         'room_name': room_name,
+        'user_id': user_id,
         'interview_type': 'behavioral',
         'difficulty_level': 'medium',
         'position': 'Software Engineer',
@@ -401,6 +460,9 @@ async def get_interview_config(room_name: str) -> Dict[str, Any]:
         'custom_instructions': '',
         'interview_context': {}
     }
+    
+    logger.info(f"Generated default config for room {room_name}: {config}")
+    return config
 
 async def start_agent_for_session(session_config: Dict[str, Any]):
     """Start the interview agent for a specific session (called from Flask routes)"""

@@ -9,7 +9,6 @@ import PyPDF2
 import io
 from flask import current_app
 
-# LiveKit imports - handle if not installed
 try:
     from livekit import api
     from livekit.api import AccessToken, VideoGrants
@@ -244,20 +243,62 @@ def get_agent_token(room_name):
 async def get_document_content(document_url):
     """Fetch and extract content from a document URL"""
     try:
-        response = requests.get(document_url, timeout=30)
+        if not document_url:
+            logger.warning("Empty document URL provided")
+            return None
+            
+        logger.info(f"Fetching document content from: {document_url[:100]}...")
+        
+        # Add headers to mimic a browser request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,*/*'
+        }
+        
+        response = requests.get(document_url, timeout=30, headers=headers)
         response.raise_for_status()
         
         content_type = response.headers.get('content-type', '').lower()
         file_content = response.content
         
-        if 'pdf' in content_type:
-            return extract_pdf_content(file_content)
-        elif 'text' in content_type:
-            return file_content.decode('utf-8')
-        else:
-            logger.warning(f"Unsupported content type: {content_type}")
+        logger.info(f"Downloaded {len(file_content)} bytes, content-type: {content_type}")
+        
+        if 'pdf' in content_type or document_url.lower().endswith('.pdf'):
+            content = extract_pdf_content(file_content)
+            if content:
+                logger.info(f"Successfully extracted {len(content)} characters from PDF")
+                return content
+            else:
+                logger.warning("Failed to extract content from PDF")
+                return None
+                
+        elif any(term in content_type for term in ['text', 'plain']) or document_url.lower().endswith('.txt'):
+            content = file_content.decode('utf-8', errors='ignore')
+            logger.info(f"Successfully extracted {len(content)} characters from text file")
+            return content
+            
+        elif 'msword' in content_type or document_url.lower().endswith(('.doc', '.docx')):
+            logger.warning("Word document processing not yet implemented")
             return None
             
+        else:
+            logger.warning(f"Unsupported content type: {content_type}")
+            # Try to decode as text anyway
+            try:
+                content = file_content.decode('utf-8', errors='ignore')
+                if len(content.strip()) > 0:
+                    logger.info(f"Successfully decoded unknown format as text: {len(content)} characters")
+                    return content
+            except Exception:
+                pass
+            return None
+            
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout fetching document from: {document_url}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error fetching document: {str(e)}")
+        return None
     except Exception as e:
         logger.error(f"Error fetching document content: {str(e)}")
         return None
@@ -265,14 +306,41 @@ async def get_document_content(document_url):
 def extract_pdf_content(pdf_bytes):
     """Extract text from PDF bytes"""
     try:
+        if not pdf_bytes:
+            logger.warning("Empty PDF bytes provided")
+            return None
+            
         pdf_file = io.BytesIO(pdf_bytes)
         reader = PyPDF2.PdfReader(pdf_file)
         
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
+        if len(reader.pages) == 0:
+            logger.warning("PDF has no pages")
+            return None
         
-        return text.strip()
+        text = ""
+        pages_processed = 0
+        
+        for page_num, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+                    pages_processed += 1
+                else:
+                    logger.warning(f"No text extracted from page {page_num + 1}")
+            except Exception as e:
+                logger.warning(f"Error extracting text from page {page_num + 1}: {e}")
+                continue
+        
+        extracted_text = text.strip()
+        
+        if extracted_text:
+            logger.info(f"Successfully extracted text from {pages_processed}/{len(reader.pages)} pages, "
+                       f"{len(extracted_text)} characters total")
+            return extracted_text
+        else:
+            logger.warning("No text could be extracted from PDF")
+            return None
         
     except Exception as e:
         logger.error(f"Error extracting PDF: {str(e)}")

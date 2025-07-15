@@ -411,386 +411,72 @@ def stripe_webhook():
                 return jsonify({"error": "Processing error"}), 500
 
         elif event_type == 'invoice.payment_succeeded':
-            invoice = data
-            subscription_id = invoice.get('subscription')
-            price_id = invoice.get('lines', {}).get('data', [{}])[0].get('price', {}).get('id')
-            
-            # SECURITY: Validate required fields
-            if not subscription_id or not isinstance(subscription_id, str):
-                current_app.logger.error("SECURITY ERROR: Invalid subscription_id in invoice.payment_succeeded")
-                return jsonify({"error": "Invalid subscription ID"}), 400
-
-            if not price_id:
-                current_app.logger.error("SECURITY ERROR: No price_id found in invoice.payment_succeeded")
-                return jsonify({"error": "Invalid price ID"}), 400
-
             try:
-                # Find the user by stripe_subscription_id (using admin client)
-                user_res = supabase.table('user_subscriptions').select('user_id').eq('stripe_subscription_id', subscription_id).single().execute()
-            except APIError as e:
-                if e.code == 'PGRST116': # "JSON object requested, multiple (or no) rows returned"
-                    current_app.logger.warning(f"Webhook 'invoice.payment_succeeded' could not find subscription {subscription_id}. This is likely a race condition with 'checkout.session.completed'. Asking Stripe to retry.")
-                    return jsonify(error="Subscription not processed yet, retry later"), 503
-                else:
-                    raise # Re-raise other API errors
-
-            try:
-                user_id = user_res.data['user_id']
-            except (KeyError, TypeError) as e:
-                current_app.logger.error(f"Webhook 'invoice.payment_succeeded' could not extract user_id from subscription {subscription_id}. Error: {e}")
-                return jsonify(error="Invalid subscription data"), 400
-
-            # Find the corresponding internal plan in our database using the Stripe price_id from the invoice.
-            # This is the correct, database-driven way to link a Stripe payment to an internal plan.
-            plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
-
-            if not (plan_res and plan_res.data):
-                # This is a critical configuration error. A payment succeeded for a Stripe Price ID
-                # that does not exist in our subscription_plans table.
-                error_message = f"Configuration Error: No plan found in the database for stripe_price_id '{price_id}'. Payment cannot be processed for user {user_id}."
-                current_app.logger.error(error_message)
-                return jsonify(error=error_message), 500
-            
-            new_plan_id = plan_res.data['id']
-            
-            # Get dates from the invoice object
-            period_start_ts = invoice['period_start']
-            period_end_ts = invoice['period_end']
-            started_at = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
-            ends_at = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
-
-            # Update user's current subscription state in the user_subscriptions table
-            update_payload = {
-                'status': 'active',
-                'plan_id': new_plan_id,
-                'current_period_start': started_at.isoformat(),
-                'current_period_end': ends_at.isoformat(),
-                'next_billing_date': ends_at.isoformat(),
-                'stripe_price_id': price_id,
-            }
-            supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
-
-            # === NEW: Update feature_usage table with new plan_id ===
-            try:
-                # Get the user's most recent feature_usage record
-                usage_res = supabase.table('feature_usage') \
-                    .select('*') \
-                    .eq('user_id', user_id) \
-                    .order('period_end', desc=True) \
-                    .limit(1) \
-                    .maybe_single() \
-                    .execute()
+                invoice = data
+                subscription_id = invoice.get('subscription')
+                price_id = invoice.get('lines', {}).get('data', [{}])[0].get('price', {}).get('id')
                 
-                usage_record = usage_res.data if usage_res else None
-                today = date.today()
-                
-                if usage_record and usage_record.get('period_end'):
-                    # Check if the usage record is for the current period (not expired)
-                    usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
-                    is_current_period = today <= usage_period_end
-                    
-                    if is_current_period and usage_record.get('plan_id') != new_plan_id:
-                        # Update existing current period record with new plan_id
-                        supabase.table('feature_usage') \
-                            .update({'plan_id': new_plan_id}) \
-                            .eq('user_id', user_id) \
-                            .eq('period_start', usage_record['period_start']) \
-                            .execute()
-                        current_app.logger.info(f"Webhook: Updated feature_usage plan_id from {usage_record.get('plan_id')} to {new_plan_id} for user {user_id}")
-                    elif not is_current_period:
-                        # Period expired, create new record for current period with new plan_id
-                        # Get user info for period calculation
-                        user_res = supabase.auth.admin.get_user_by_id(user_id)
-                        if user_res.user:
-                            period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
-                            display_name = get_user_display_name(user_res.user)
-                            
-                            new_usage_payload = {
-                                'user_id': user_id,
-                                'plan_id': new_plan_id,
-                                'display_name': display_name,
-                                'period_start': str(period_start),
-                                'period_end': str(period_end)
-                            }
-                            
-                            # Carry over lifetime counts from expired record
-                            for key, value in usage_record.items():
-                                if key.endswith('_lifetime_count'):
-                                    new_usage_payload[key] = value or 0
-                                    # Reset corresponding period count
-                                    period_key = key.replace('_lifetime_count', '_period_count')
-                                    new_usage_payload[period_key] = 0
-                            
-                            supabase.table('feature_usage').upsert(
-                                new_usage_payload,
-                                on_conflict='user_id',
-                                returning='minimal'
-                            ).execute()
-                            current_app.logger.info(f"Webhook: Created new feature_usage record with plan_id {new_plan_id} for user {user_id} (period expired)")
-                else:
-                    # No usage record exists, create one for the current period
-                    user_res = supabase.auth.admin.get_user_by_id(user_id)
-                    if user_res.user:
-                        period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
-                        display_name = get_user_display_name(user_res.user)
-                        
-                        new_usage_payload = {
-                            'user_id': user_id,
-                            'plan_id': new_plan_id,
-                            'display_name': display_name,
-                            'period_start': str(period_start),
-                            'period_end': str(period_end)
-                        }
-                        
-                        supabase.table('feature_usage').upsert(
-                            new_usage_payload,
-                            on_conflict='user_id',
-                            returning='minimal'
-                        ).execute()
-                        current_app.logger.info(f"Webhook: Created initial feature_usage record with plan_id {new_plan_id} for user {user_id}")
-                        
-            except Exception as feature_usage_error:
-                # Don't fail the entire webhook if feature_usage update fails
-                # This ensures payment processing completes even if feature tracking has issues
-                current_app.logger.error(f"Webhook: Failed to update feature_usage for user {user_id} after successful payment. Error: {feature_usage_error}")
-            # === END: Feature usage update ===
+                # SECURITY: Validate required fields
+                if not subscription_id or not isinstance(subscription_id, str):
+                    current_app.logger.error("SECURITY ERROR: Invalid subscription_id in invoice.payment_succeeded")
+                    return jsonify({"error": "Invalid subscription ID"}), 400
 
-            # Log this event to the history table
-            history_payload = {
-                'user_id': user_id,
-                'plan_id': new_plan_id,
-                'status': 'active',
-                'stripe_subscription_id': subscription_id,
-                'started_at': started_at.isoformat(),
-                'hosted_invoice_url': invoice.get('hosted_invoice_url')
-            }
-            supabase.table('subscription_histories').insert(history_payload).execute()
+                if not price_id:
+                    current_app.logger.error("SECURITY ERROR: No price_id found in invoice.payment_succeeded")
+                    return jsonify({"error": "Invalid price ID"}), 400
 
-            current_app.logger.info(f"Successfully logged 'active' (payment succeeded) subscription for user {user_id}")
-
-        except Exception as e:
-            error_message = f"Webhook processing failed for '{event_type}'. Customer: {customer_id}. Error: {e}"
-            current_app.logger.error(error_message, exc_info=True)
-            return jsonify(error=error_message), 500
-
-    elif event_type == 'customer.subscription.updated':
-        subscription = data
-        subscription_id = subscription.get('id')
-        customer_id = subscription.get('customer')
-        status = subscription.get('status')
-        current_app.logger.info(f"Webhook: 'customer.subscription.updated' for sub_id {subscription_id} with status '{status}'")
-
-        if not all([subscription_id, customer_id, status]):
-            current_app.logger.error(f"Webhook Error: 'customer.subscription.updated' is missing required IDs. Sub ID: {subscription_id}")
-            return jsonify(success=True)
-
-        try:
-            # Find the user by their Stripe subscription ID.
-            sub_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
-            user_id = sub_res.data['user_id']
-            display_name = sub_res.data['display_name']
-
-            if not user_id:
-                raise Exception(f"No user found for subscription_id {subscription_id}")
-
-            # Extract the price ID from the first line item.
-            if not subscription.get('items') or not subscription['items'].get('data'):
-                raise Exception(f"Subscription {subscription_id} has no line items.")
-            
-            price_id = subscription['items']['data'][0]['price']['id']
-            
-            # Find the corresponding internal plan ID from our database.
-            plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
-            if not plan_res.data:
-                raise Exception(f"Configuration Error: No plan found for stripe_price_id '{price_id}'.")
-            
-            new_plan_id = plan_res.data['id']
-            
-            # Get period dates from the subscription object.
-            period_start_ts = subscription['current_period_start']
-            period_end_ts = subscription['current_period_end']
-            started_at = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
-            ends_at = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
-            
-            # --- NEW: Fetch the invoice to get the hosted_invoice_url ---
-            hosted_invoice_url = None
-            latest_invoice_id = subscription.get('latest_invoice')
-            if latest_invoice_id:
                 try:
-                    invoice = stripe.Invoice.retrieve(latest_invoice_id)
-                    hosted_invoice_url = invoice.get('hosted_invoice_url')
-                except Exception as e:
-                    current_app.logger.error(f"Failed to retrieve invoice {latest_invoice_id} for user {user_id}. Error: {e}")
-            # --- END NEW ---
+                    # Find the user by stripe_subscription_id (using admin client)
+                    user_res = supabase.table('user_subscriptions').select('user_id').eq('stripe_subscription_id', subscription_id).single().execute()
+                except APIError as e:
+                    if e.code == 'PGRST116': # "JSON object requested, multiple (or no) rows returned"
+                        current_app.logger.warning(f"Webhook 'invoice.payment_succeeded' could not find subscription {subscription_id}. This is likely a race condition with 'checkout.session.completed'. Asking Stripe to retry.")
+                        return jsonify(error="Subscription not processed yet, retry later"), 503
+                    else:
+                        raise # Re-raise other API errors
 
-            # Update user's current subscription state.
-            update_payload = {
-                'status': status,
-                'plan_id': new_plan_id,
-                'current_period_start': started_at.isoformat(),
-                'current_period_end': ends_at.isoformat(),
-                'next_billing_date': ends_at.isoformat(),
-                'stripe_price_id': price_id,
-                'updated_at': datetime.utcnow().isoformat()
-            }
-            supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
+                try:
+                    user_id = user_res.data['user_id']
+                except (KeyError, TypeError) as e:
+                    current_app.logger.error(f"Webhook 'invoice.payment_succeeded' could not extract user_id from subscription {subscription_id}. Error: {e}")
+                    return jsonify(error="Invalid subscription data"), 400
 
-            # === NEW: Update feature_usage table with new plan_id ===
-            try:
-                # Get the user's most recent feature_usage record
-                usage_res = supabase.table('feature_usage') \
-                    .select('*') \
-                    .eq('user_id', user_id) \
-                    .order('period_end', desc=True) \
-                    .limit(1) \
-                    .maybe_single() \
-                    .execute()
+                # Find the corresponding internal plan in our database using the Stripe price_id from the invoice.
+                # This is the correct, database-driven way to link a Stripe payment to an internal plan.
+                plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
+
+                if not (plan_res and plan_res.data):
+                    # This is a critical configuration error. A payment succeeded for a Stripe Price ID
+                    # that does not exist in our subscription_plans table.
+                    error_message = f"Configuration Error: No plan found in the database for stripe_price_id '{price_id}'. Payment cannot be processed for user {user_id}."
+                    current_app.logger.error(error_message)
+                    return jsonify(error=error_message), 500
                 
-                usage_record = usage_res.data if usage_res else None
-                today = date.today()
+                new_plan_id = plan_res.data['id']
                 
-                if usage_record and usage_record.get('period_end'):
-                    # Check if the usage record is for the current period (not expired)
-                    usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
-                    is_current_period = today <= usage_period_end
-                    
-                    if is_current_period and usage_record.get('plan_id') != new_plan_id:
-                        # Update existing current period record with new plan_id
-                        supabase.table('feature_usage') \
-                            .update({'plan_id': new_plan_id}) \
-                            .eq('user_id', user_id) \
-                            .eq('period_start', usage_record['period_start']) \
-                            .execute()
-                        current_app.logger.info(f"Webhook (subscription.updated): Updated feature_usage plan_id from {usage_record.get('plan_id')} to {new_plan_id} for user {user_id}")
-                    elif not is_current_period:
-                        # Period expired, create new record for current period with new plan_id
-                        # Get user info for period calculation
-                        user_res = supabase.auth.admin.get_user_by_id(user_id)
-                        if user_res.user:
-                            period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
-                            
-                            new_usage_payload = {
-                                'user_id': user_id,
-                                'plan_id': new_plan_id,
-                                'display_name': display_name,
-                                'period_start': str(period_start),
-                                'period_end': str(period_end)
-                            }
-                            
-                            # Carry over lifetime counts from expired record
-                            for key, value in usage_record.items():
-                                if key.endswith('_lifetime_count'):
-                                    new_usage_payload[key] = value or 0
-                                    # Reset corresponding period count
-                                    period_key = key.replace('_lifetime_count', '_period_count')
-                                    new_usage_payload[period_key] = 0
-                            
-                            supabase.table('feature_usage').upsert(
-                                new_usage_payload,
-                                on_conflict='user_id',
-                                returning='minimal'
-                            ).execute()
-                            current_app.logger.info(f"Webhook (subscription.updated): Created new feature_usage record with plan_id {new_plan_id} for user {user_id} (period expired)")
-                else:
-                    # No usage record exists, create one for the current period
-                    user_res = supabase.auth.admin.get_user_by_id(user_id)
-                    if user_res.user:
-                        period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
-                        
-                        new_usage_payload = {
-                            'user_id': user_id,
-                            'plan_id': new_plan_id,
-                            'display_name': display_name,
-                            'period_start': str(period_start),
-                            'period_end': str(period_end)
-                        }
-                        
-                        supabase.table('feature_usage').upsert(
-                            new_usage_payload,
-                            on_conflict='user_id',
-                            returning='minimal'
-                        ).execute()
-                        current_app.logger.info(f"Webhook (subscription.updated): Created initial feature_usage record with plan_id {new_plan_id} for user {user_id}")
-                        
-            except Exception as feature_usage_error:
-                # Don't fail the entire webhook if feature_usage update fails
-                # This ensures payment processing completes even if feature tracking has issues
-                current_app.logger.error(f"Webhook (subscription.updated): Failed to update feature_usage for user {user_id} after subscription update. Error: {feature_usage_error}")
-            # === END: Feature usage update ===
+                # Get dates from the invoice object
+                period_start_ts = invoice['period_start']
+                period_end_ts = invoice['period_end']
+                started_at = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
+                ends_at = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
 
-            # Log this update to the history table for auditing.
-            history_payload = {
-                'user_id': user_id,
-                'display_name': display_name,
-                'plan_id': new_plan_id,
-                'status': status,
-                'stripe_subscription_id': subscription_id,
-                'stripe_price_id': price_id,
-                'started_at': started_at.isoformat(),
-                'hosted_invoice_url': hosted_invoice_url # Add the URL here
-            }
-            supabase.table('subscription_histories').insert(history_payload).execute()
-
-            current_app.logger.info(f"Successfully processed 'customer.subscription.updated' for user {user_id}, plan_id {new_plan_id}.")
-
-        except Exception as e:
-            error_message = f"Webhook processing failed for '{event_type}'. Subscription: {subscription_id}. Error: {e}"
-            current_app.logger.error(error_message, exc_info=True)
-            return jsonify(error=error_message), 500
-
-    elif event_type == 'invoice.payment_failed':
-        invoice = data
-        customer_id = invoice.get('customer')
-        subscription_id = invoice.get('subscription')
-        billing_reason = invoice.get('billing_reason')
-
-        # On failure, we just log it for now. We can add more robust handling later,
-        # like emailing the user.
-        current_app.logger.warning(f"Webhook: 'invoice.payment_failed' for subscription {subscription_id}, customer {customer_id}. Reason: {billing_reason}")
-
-    elif event_type == 'customer.subscription.deleted':
-        # Handles subscription cancellations at the end of the billing period
-        subscription = data
-        subscription_id = subscription.get('id')
-        customer_id = subscription.get('customer')
-
-        if not subscription_id:
-            return jsonify(status="error", message="No subscription id provided"), 400
-
-        if customer_id:
-            # We need user_id and created_at for the new period
-            user_res = supabase.table('user_subscriptions').select('id, user_id, display_name').eq('stripe_customer_id', customer_id).maybe_single().execute()
-
-            if user_res.data:
-                sub_id = user_res.data['id']
-                uid = user_res.data['user_id']
-                display_name = user_res.data['display_name']
-                
-                auth_user_res = supabase.auth.admin.get_user_by_id(uid)
-                if not auth_user_res.user:
-                    period_start = date.today().replace(day=1)
-                    period_end = period_start + relativedelta(months=1) - relativedelta(days=1)
-                else:
-                    period_start, period_end = get_anniversary_period(auth_user_res.user.created_at, date.today())
-                
-                period_start_dt = datetime.combine(period_start, datetime.min.time(), tzinfo=timezone.utc)
-
-                # Update main table
+                # Update user's current subscription state in the user_subscriptions table
                 update_payload = {
-                    'plan_id': 1, 'status': 'free', 'stripe_subscription_id': None,
-                    'stripe_customer_id': None, 'stripe_price_id': None,
-                    'current_period_start': period_start_dt.isoformat(),
-                    'current_period_end': str(period_end), 'next_billing_date': None,
-                    'updated_at': datetime.utcnow().isoformat()
+                    'status': 'active',
+                    'plan_id': new_plan_id,
+                    'current_period_start': started_at.isoformat(),
+                    'current_period_end': ends_at.isoformat(),
+                    'next_billing_date': ends_at.isoformat(),
+                    'stripe_price_id': price_id,
                 }
-                supabase.table('user_subscriptions').update(update_payload).eq('id', sub_id).execute()
+                supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
 
-                # === NEW: Update feature_usage table to free plan ===
+                # === NEW: Update feature_usage table with new plan_id ===
                 try:
                     # Get the user's most recent feature_usage record
                     usage_res = supabase.table('feature_usage') \
                         .select('*') \
-                        .eq('user_id', uid) \
+                        .eq('user_id', user_id) \
                         .order('period_end', desc=True) \
                         .limit(1) \
                         .maybe_single() \
@@ -804,16 +490,355 @@ def stripe_webhook():
                         usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
                         is_current_period = today <= usage_period_end
                         
-                        if is_current_period and usage_record.get('plan_id') != 1:
-                            # Update existing current period record to free plan
+                        if is_current_period and usage_record.get('plan_id') != new_plan_id:
+                            # Update existing current period record with new plan_id
                             supabase.table('feature_usage') \
-                                .update({'plan_id': 1}) \
-                                .eq('user_id', uid) \
+                                .update({'plan_id': new_plan_id}) \
+                                .eq('user_id', user_id) \
                                 .eq('period_start', usage_record['period_start']) \
                                 .execute()
-                            current_app.logger.info(f"Webhook (subscription.deleted): Updated feature_usage plan_id from {usage_record.get('plan_id')} to 1 (free) for user {uid}")
+                            current_app.logger.info(f"Webhook: Updated feature_usage plan_id from {usage_record.get('plan_id')} to {new_plan_id} for user {user_id}")
                         elif not is_current_period:
-                            # Period expired, create new record for current period with free plan
+                            # Period expired, create new record for current period with new plan_id
+                            # Get user info for period calculation
+                            user_res = supabase.auth.admin.get_user_by_id(user_id)
+                            if user_res.user:
+                                period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
+                                display_name = get_user_display_name(user_res.user)
+                                
+                                new_usage_payload = {
+                                    'user_id': user_id,
+                                    'plan_id': new_plan_id,
+                                    'display_name': display_name,
+                                    'period_start': str(period_start),
+                                    'period_end': str(period_end)
+                                }
+                                
+                                # Carry over lifetime counts from expired record
+                                for key, value in usage_record.items():
+                                    if key.endswith('_lifetime_count'):
+                                        new_usage_payload[key] = value or 0
+                                        # Reset corresponding period count
+                                        period_key = key.replace('_lifetime_count', '_period_count')
+                                        new_usage_payload[period_key] = 0
+                                
+                                supabase.table('feature_usage').upsert(
+                                    new_usage_payload,
+                                    on_conflict='user_id',
+                                    returning='minimal'
+                                ).execute()
+                                current_app.logger.info(f"Webhook: Created new feature_usage record with plan_id {new_plan_id} for user {user_id} (period expired)")
+                        else:
+                            # No usage record exists, create one for the current period
+                            user_res = supabase.auth.admin.get_user_by_id(user_id)
+                            if user_res.user:
+                                period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
+                                display_name = get_user_display_name(user_res.user)
+                                
+                                new_usage_payload = {
+                                    'user_id': user_id,
+                                    'plan_id': new_plan_id,
+                                    'display_name': display_name,
+                                    'period_start': str(period_start),
+                                    'period_end': str(period_end)
+                                }
+                                
+                                supabase.table('feature_usage').upsert(
+                                    new_usage_payload,
+                                    on_conflict='user_id',
+                                    returning='minimal'
+                                ).execute()
+                                current_app.logger.info(f"Webhook: Created initial feature_usage record with plan_id {new_plan_id} for user {user_id}")
+                                
+                except Exception as feature_usage_error:
+                    # Don't fail the entire webhook if feature_usage update fails
+                    # This ensures payment processing completes even if feature tracking has issues
+                    current_app.logger.error(f"Webhook: Failed to update feature_usage for user {user_id} after successful payment. Error: {feature_usage_error}")
+                # === END: Feature usage update ===
+
+                # Log this event to the history table
+                history_payload = {
+                    'user_id': user_id,
+                    'plan_id': new_plan_id,
+                    'status': 'active',
+                    'stripe_subscription_id': subscription_id,
+                    'started_at': started_at.isoformat(),
+                    'hosted_invoice_url': invoice.get('hosted_invoice_url')
+                }
+                supabase.table('subscription_histories').insert(history_payload).execute()
+
+                current_app.logger.info(f"Successfully logged 'active' (payment succeeded) subscription for user {user_id}")
+
+            except Exception as e:
+                error_message = f"Webhook processing failed for '{event_type}'. Customer: {customer_id}. Error: {e}"
+                current_app.logger.error(error_message, exc_info=True)
+                return jsonify(error=error_message), 500
+
+        elif event_type == 'customer.subscription.updated':
+            subscription = data
+            subscription_id = subscription.get('id')
+            customer_id = subscription.get('customer')
+            status = subscription.get('status')
+            current_app.logger.info(f"Webhook: 'customer.subscription.updated' for sub_id {subscription_id} with status '{status}'")
+
+            if not all([subscription_id, customer_id, status]):
+                current_app.logger.error(f"Webhook Error: 'customer.subscription.updated' is missing required IDs. Sub ID: {subscription_id}")
+                return jsonify(success=True)
+
+            try:
+                # Find the user by their Stripe subscription ID.
+                sub_res = supabase.table('user_subscriptions').select('user_id, display_name').eq('stripe_subscription_id', subscription_id).single().execute()
+                user_id = sub_res.data['user_id']
+                display_name = sub_res.data['display_name']
+
+                if not user_id:
+                    raise Exception(f"No user found for subscription_id {subscription_id}")
+
+                # Extract the price ID from the first line item.
+                if not subscription.get('items') or not subscription['items'].get('data'):
+                    raise Exception(f"Subscription {subscription_id} has no line items.")
+                
+                price_id = subscription['items']['data'][0]['price']['id']
+                
+                # Find the corresponding internal plan ID from our database.
+                plan_res = supabase.table('subscription_plans').select('id').eq('stripe_price_id', price_id).single().execute()
+                if not plan_res.data:
+                    raise Exception(f"Configuration Error: No plan found for stripe_price_id '{price_id}'.")
+                
+                new_plan_id = plan_res.data['id']
+                
+                # Get period dates from the subscription object.
+                period_start_ts = subscription['current_period_start']
+                period_end_ts = subscription['current_period_end']
+                started_at = datetime.fromtimestamp(period_start_ts, tz=timezone.utc)
+                ends_at = datetime.fromtimestamp(period_end_ts, tz=timezone.utc)
+                
+                # --- NEW: Fetch the invoice to get the hosted_invoice_url ---
+                hosted_invoice_url = None
+                latest_invoice_id = subscription.get('latest_invoice')
+                if latest_invoice_id:
+                    try:
+                        invoice = stripe.Invoice.retrieve(latest_invoice_id)
+                        hosted_invoice_url = invoice.get('hosted_invoice_url')
+                    except Exception as e:
+                        current_app.logger.error(f"Failed to retrieve invoice {latest_invoice_id} for user {user_id}. Error: {e}")
+                # --- END NEW ---
+
+                # Update user's current subscription state.
+                update_payload = {
+                    'status': status,
+                    'plan_id': new_plan_id,
+                    'current_period_start': started_at.isoformat(),
+                    'current_period_end': ends_at.isoformat(),
+                    'next_billing_date': ends_at.isoformat(),
+                    'stripe_price_id': price_id,
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                supabase.table('user_subscriptions').update(update_payload).eq('user_id', user_id).execute()
+
+                # === NEW: Update feature_usage table with new plan_id ===
+                try:
+                    # Get the user's most recent feature_usage record
+                    usage_res = supabase.table('feature_usage') \
+                        .select('*') \
+                        .eq('user_id', user_id) \
+                        .order('period_end', desc=True) \
+                        .limit(1) \
+                        .maybe_single() \
+                        .execute()
+                    
+                    usage_record = usage_res.data if usage_res else None
+                    today = date.today()
+                    
+                    if usage_record and usage_record.get('period_end'):
+                        # Check if the usage record is for the current period (not expired)
+                        usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
+                        is_current_period = today <= usage_period_end
+                        
+                        if is_current_period and usage_record.get('plan_id') != new_plan_id:
+                            # Update existing current period record with new plan_id
+                            supabase.table('feature_usage') \
+                                .update({'plan_id': new_plan_id}) \
+                                .eq('user_id', user_id) \
+                                .eq('period_start', usage_record['period_start']) \
+                                .execute()
+                            current_app.logger.info(f"Webhook (subscription.updated): Updated feature_usage plan_id from {usage_record.get('plan_id')} to {new_plan_id} for user {user_id}")
+                        elif not is_current_period:
+                            # Period expired, create new record for current period with new plan_id
+                            # Get user info for period calculation
+                            user_res = supabase.auth.admin.get_user_by_id(user_id)
+                            if user_res.user:
+                                period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
+                                
+                                new_usage_payload = {
+                                    'user_id': user_id,
+                                    'plan_id': new_plan_id,
+                                    'display_name': display_name,
+                                    'period_start': str(period_start),
+                                    'period_end': str(period_end)
+                                }
+                                
+                                # Carry over lifetime counts from expired record
+                                for key, value in usage_record.items():
+                                    if key.endswith('_lifetime_count'):
+                                        new_usage_payload[key] = value or 0
+                                        # Reset corresponding period count
+                                        period_key = key.replace('_lifetime_count', '_period_count')
+                                        new_usage_payload[period_key] = 0
+                                
+                                supabase.table('feature_usage').upsert(
+                                    new_usage_payload,
+                                    on_conflict='user_id',
+                                    returning='minimal'
+                                ).execute()
+                                current_app.logger.info(f"Webhook (subscription.updated): Created new feature_usage record with plan_id {new_plan_id} for user {user_id} (period expired)")
+                        else:
+                            # No usage record exists, create one for the current period
+                            user_res = supabase.auth.admin.get_user_by_id(user_id)
+                            if user_res.user:
+                                period_start, period_end = get_anniversary_period(user_res.user.created_at, today)
+                                
+                                new_usage_payload = {
+                                    'user_id': user_id,
+                                    'plan_id': new_plan_id,
+                                    'display_name': display_name,
+                                    'period_start': str(period_start),
+                                    'period_end': str(period_end)
+                                }
+                                
+                                supabase.table('feature_usage').upsert(
+                                    new_usage_payload,
+                                    on_conflict='user_id',
+                                    returning='minimal'
+                                ).execute()
+                                current_app.logger.info(f"Webhook (subscription.updated): Created initial feature_usage record with plan_id {new_plan_id} for user {user_id}")
+                                
+                except Exception as feature_usage_error:
+                    # Don't fail the entire webhook if feature_usage update fails
+                    # This ensures payment processing completes even if feature tracking has issues
+                    current_app.logger.error(f"Webhook (subscription.updated): Failed to update feature_usage for user {user_id} after subscription update. Error: {feature_usage_error}")
+                # === END: Feature usage update ===
+
+                # Log this update to the history table for auditing.
+                history_payload = {
+                    'user_id': user_id,
+                    'display_name': display_name,
+                    'plan_id': new_plan_id,
+                    'status': status,
+                    'stripe_subscription_id': subscription_id,
+                    'stripe_price_id': price_id,
+                    'started_at': started_at.isoformat(),
+                    'hosted_invoice_url': hosted_invoice_url # Add the URL here
+                }
+                supabase.table('subscription_histories').insert(history_payload).execute()
+
+                current_app.logger.info(f"Successfully processed 'customer.subscription.updated' for user {user_id}, plan_id {new_plan_id}.")
+
+            except Exception as e:
+                error_message = f"Webhook processing failed for '{event_type}'. Subscription: {subscription_id}. Error: {e}"
+                current_app.logger.error(error_message, exc_info=True)
+                return jsonify(error=error_message), 500
+
+        elif event_type == 'invoice.payment_failed':
+            invoice = data
+            customer_id = invoice.get('customer')
+            subscription_id = invoice.get('subscription')
+            billing_reason = invoice.get('billing_reason')
+
+            # On failure, we just log it for now. We can add more robust handling later,
+            # like emailing the user.
+            current_app.logger.warning(f"Webhook: 'invoice.payment_failed' for subscription {subscription_id}, customer {customer_id}. Reason: {billing_reason}")
+
+        elif event_type == 'customer.subscription.deleted':
+            # Handles subscription cancellations at the end of the billing period
+            subscription = data
+            subscription_id = subscription.get('id')
+            customer_id = subscription.get('customer')
+
+            if not subscription_id:
+                return jsonify(status="error", message="No subscription id provided"), 400
+
+            if customer_id:
+                # We need user_id and created_at for the new period
+                user_res = supabase.table('user_subscriptions').select('id, user_id, display_name').eq('stripe_customer_id', customer_id).maybe_single().execute()
+
+                if user_res.data:
+                    sub_id = user_res.data['id']
+                    uid = user_res.data['user_id']
+                    display_name = user_res.data['display_name']
+                    
+                    auth_user_res = supabase.auth.admin.get_user_by_id(uid)
+                    if not auth_user_res.user:
+                        period_start = date.today().replace(day=1)
+                        period_end = period_start + relativedelta(months=1) - relativedelta(days=1)
+                    else:
+                        period_start, period_end = get_anniversary_period(auth_user_res.user.created_at, date.today())
+                    
+                    period_start_dt = datetime.combine(period_start, datetime.min.time(), tzinfo=timezone.utc)
+
+                    # Update main table
+                    update_payload = {
+                        'plan_id': 1, 'status': 'free', 'stripe_subscription_id': None,
+                        'stripe_customer_id': None, 'stripe_price_id': None,
+                        'current_period_start': period_start_dt.isoformat(),
+                        'current_period_end': str(period_end), 'next_billing_date': None,
+                        'updated_at': datetime.utcnow().isoformat()
+                    }
+                    supabase.table('user_subscriptions').update(update_payload).eq('id', sub_id).execute()
+
+                    # === NEW: Update feature_usage table to free plan ===
+                    try:
+                        # Get the user's most recent feature_usage record
+                        usage_res = supabase.table('feature_usage') \
+                            .select('*') \
+                            .eq('user_id', uid) \
+                            .order('period_end', desc=True) \
+                            .limit(1) \
+                            .maybe_single() \
+                            .execute()
+                        
+                        usage_record = usage_res.data if usage_res else None
+                        today = date.today()
+                        
+                        if usage_record and usage_record.get('period_end'):
+                            # Check if the usage record is for the current period (not expired)
+                            usage_period_end = datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
+                            is_current_period = today <= usage_period_end
+                            
+                            if is_current_period and usage_record.get('plan_id') != 1:
+                                # Update existing current period record to free plan
+                                supabase.table('feature_usage') \
+                                    .update({'plan_id': 1}) \
+                                    .eq('user_id', uid) \
+                                    .eq('period_start', usage_record['period_start']) \
+                                    .execute()
+                                current_app.logger.info(f"Webhook (subscription.deleted): Updated feature_usage plan_id from {usage_record.get('plan_id')} to 1 (free) for user {uid}")
+                            elif not is_current_period:
+                                # Period expired, create new record for current period with free plan
+                                new_usage_payload = {
+                                    'user_id': uid,
+                                    'plan_id': 1,  # Free plan
+                                    'display_name': display_name,
+                                    'period_start': str(period_start),
+                                    'period_end': str(period_end)
+                                }
+                                
+                                # Carry over lifetime counts from expired record
+                                for key, value in usage_record.items():
+                                    if key.endswith('_lifetime_count'):
+                                        new_usage_payload[key] = value or 0
+                                        # Reset corresponding period count
+                                        period_key = key.replace('_lifetime_count', '_period_count')
+                                        new_usage_payload[period_key] = 0
+                                
+                                supabase.table('feature_usage').upsert(
+                                    new_usage_payload,
+                                    on_conflict='user_id',
+                                    returning='minimal'
+                                ).execute()
+                                current_app.logger.info(f"Webhook (subscription.deleted): Created new feature_usage record with plan_id 1 (free) for user {uid} (period expired)")
+                        else:
+                            # No usage record exists, create one for the current period with free plan
                             new_usage_payload = {
                                 'user_id': uid,
                                 'plan_id': 1,  # Free plan
@@ -822,50 +847,30 @@ def stripe_webhook():
                                 'period_end': str(period_end)
                             }
                             
-                            # Carry over lifetime counts from expired record
-                            for key, value in usage_record.items():
-                                if key.endswith('_lifetime_count'):
-                                    new_usage_payload[key] = value or 0
-                                    # Reset corresponding period count
-                                    period_key = key.replace('_lifetime_count', '_period_count')
-                                    new_usage_payload[period_key] = 0
-                            
                             supabase.table('feature_usage').upsert(
                                 new_usage_payload,
                                 on_conflict='user_id',
                                 returning='minimal'
                             ).execute()
-                            current_app.logger.info(f"Webhook (subscription.deleted): Created new feature_usage record with plan_id 1 (free) for user {uid} (period expired)")
-                    else:
-                        # No usage record exists, create one for the current period with free plan
-                        new_usage_payload = {
-                            'user_id': uid,
-                            'plan_id': 1,  # Free plan
-                            'display_name': display_name,
-                            'period_start': str(period_start),
-                            'period_end': str(period_end)
-                        }
-                        
-                        supabase.table('feature_usage').upsert(
-                            new_usage_payload,
-                            on_conflict='user_id',
-                            returning='minimal'
-                        ).execute()
-                        current_app.logger.info(f"Webhook (subscription.deleted): Created initial feature_usage record with plan_id 1 (free) for user {uid}")
-                        
-                except Exception as feature_usage_error:
-                    # Don't fail the entire webhook if feature_usage update fails
-                    current_app.logger.error(f"Webhook (subscription.deleted): Failed to update feature_usage for user {uid} after subscription deletion. Error: {feature_usage_error}")
-                # === END: Feature usage update ===
+                            current_app.logger.info(f"Webhook (subscription.deleted): Created initial feature_usage record with plan_id 1 (free) for user {uid}")
+                            
+                    except Exception as feature_usage_error:
+                        # Don't fail the entire webhook if feature_usage update fails
+                        current_app.logger.error(f"Webhook (subscription.deleted): Failed to update feature_usage for user {uid} after subscription deletion. Error: {feature_usage_error}")
+                    # === END: Feature usage update ===
 
-                # Log to history table
-                history_payload = {
-                    'user_id': uid, 'display_name': display_name,
-                    'plan_id': 1, 'status': 'free',
-                    'started_at': period_start_dt.isoformat(),
-                }
-                supabase.table('subscription_histories').insert(history_payload).execute()
-                current_app.logger.info(f"Successfully logged 'free' (subscription deleted) history for user {uid}")
+                    # Log to history table
+                    history_payload = {
+                        'user_id': uid, 'display_name': display_name,
+                        'plan_id': 1, 'status': 'free',
+                        'started_at': period_start_dt.isoformat(),
+                    }
+                    supabase.table('subscription_histories').insert(history_payload).execute()
+                    current_app.logger.info(f"Successfully logged 'free' (subscription deleted) history for user {uid}")
+
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error in webhook processing: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
     return jsonify(success=True)
 

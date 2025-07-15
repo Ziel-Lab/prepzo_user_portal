@@ -40,6 +40,11 @@ def upload_document():
     if len(file.filename) > 255:
         return jsonify({"error": "Filename too long"}), 400
 
+    # Sanitize filename for security
+    safe_filename = "".join(c for c in file.filename if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+    if not safe_filename:
+        safe_filename = f"document_{timestamp}"
+
     file_bytes = file.read()
     
     # File size validation (10MB limit)
