@@ -49,7 +49,7 @@ def search_jobs():
             500,
         )
 
-    request_timeout = current_app.config.get("THEIRSTACK_HTTP_TIMEOUT", 30)  # seconds
+    request_timeout = current_app.config.get("THEIRSTACK_HTTP_TIMEOUT", 200)  # seconds
 
     try:
         # Use the JSON body as-is; default to an empty dict if none supplied
@@ -218,7 +218,7 @@ def get_job_details():
             500,
         )
 
-    request_timeout = current_app.config.get("THEIRSTACK_HTTP_TIMEOUT", 30)  # seconds
+    request_timeout = current_app.config.get("THEIRSTACK_HTTP_TIMEOUT", 200)  # seconds
 
     try:
         # Use the JSON body as-is; default to an empty dict if none supplied

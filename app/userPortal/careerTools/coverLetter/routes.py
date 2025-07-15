@@ -2,6 +2,7 @@ from flask import request, jsonify, current_app, g
 import requests 
 from app.extensions import get_user_client, get_admin_client
 import json
+import logging
 from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import cover_letter_event
@@ -13,16 +14,16 @@ def background_db_and_analytics(db_payload, amplitude_payload=None):
     try:
         insert_response = extensions.supabase.table("cover_letter").insert(db_payload).execute()
         if not insert_response.data:
-            current_app.logger.warning(f"Warning: Supabase insert into cover_letter may have failed or returned no data. Response: {insert_response}")
+            logging.warning(f"Warning: Supabase insert into cover_letter may have failed or returned no data. Response: {insert_response}")
     except Exception as e:
-        current_app.logger.error(f"Background DB insert failed: {str(e)}")
+        logging.error(f"Background DB insert failed: {str(e)}")
     
     if amplitude_payload:
         try:
             cover_letter_event(**amplitude_payload)
-            current_app.logger.info("Cover letter Amplitude event sent successfully.")
+            logging.info("Cover letter Amplitude event sent successfully.")
         except Exception as e:
-            current_app.logger.warning(f"Background Amplitude event failed: {e}")
+            logging.warning(f"Background Amplitude event failed: {e}")
 
 def get_request_data():
     """Unified request data handling for both JSON and form data"""
@@ -60,8 +61,8 @@ def create_cover_letter():
             "additional_comments": user_additional_comments_text
         }
 
-        # Reduce timeout for better reliability
-        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload, timeout=60)
+        # Increase timeout for better reliability
+        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload, timeout=200)
         xano_response.raise_for_status()
         xano_data = xano_response.json()
 

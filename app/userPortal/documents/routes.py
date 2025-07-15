@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, g
 import os
 import magic
+import time
 from app import extensions
 from app.extensions import get_admin_client
 from app.userPortal.subscription.helpers import require_authentication
@@ -58,10 +59,10 @@ def upload_document():
         except Exception as e:
             print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
 
-    # Sanitize filename to prevent path traversal
-    safe_filename = os.path.basename(file.filename)
-    # Construct a unique path in storage using user ID and sanitized filename
-    storage_file_path = f"{current_user_id}/{safe_filename}"
+
+    # Construct a unique path in storage using user ID, timestamp, and original filename
+    timestamp = str(int(time.time()))
+    storage_file_path = f"{current_user_id}/{timestamp}_{file.filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
     # Limit comment length
@@ -73,15 +74,23 @@ def upload_document():
         admin_supabase.storage.from_(SUPABASE_BUCKET).upload(
             storage_file_path,  # Use the unique path for storage
             file_bytes,
-            file_options={
-                "content-type": final_content_type_for_storage,
-                "content-disposition": f'inline; filename="{safe_filename}"',
-                "upsert": True  # Allow overwriting existing files
-            }
+            file_options={"content-type": final_content_type_for_storage}
         )
         public_url = admin_supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path)
 
-        # Insert document metadata using admin client with explicit user filtering for security
+        # Check if document with same name already exists for this user
+        try:
+            existing_doc_check = extensions.supabase.table("user_documents") \
+                .select("id") \
+                .eq("uid", current_user_id) \
+                .eq("document_name", file.filename) \
+                .execute()
+            
+            has_existing_file = existing_doc_check.data and len(existing_doc_check.data) > 0
+        except Exception as e:
+            # If query fails, assume no existing file
+            has_existing_file = False
+
         document_data = {
             "uid": current_user_id,
             "document_name": safe_filename,  # Store sanitized filename
@@ -91,7 +100,11 @@ def upload_document():
             "document_comments": document_comments
         }
 
-        data, _ = admin_supabase.table("user_documents").insert(document_data).execute()
+        # Only add status if this is a replacement file
+        if has_existing_file:
+            document_data["status"] = "Updated"
+
+        data, _ = extensions.supabase.table("user_documents").insert(document_data).execute()
         return jsonify({"message": "File uploaded", "file_url": public_url, "db_response": data}), 201
 
     except Exception as e:
