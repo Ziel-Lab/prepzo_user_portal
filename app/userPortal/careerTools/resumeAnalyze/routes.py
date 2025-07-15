@@ -15,7 +15,7 @@ def analyze_resume():
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
+    n8n_api_url = "https://prepzo.app.n8n.cloud/webhook/resume_generator"
     
     try:
         data = request.form
@@ -27,16 +27,18 @@ def analyze_resume():
         if not all([current_resume_url, job_description]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
-        xano_payload = {
-            "current_resume": current_resume_url,
-            "job_description": job_description,
-            "company_website": company_website,
-            "additional_comments": additional_comment_text
-        }
+        # Prepare request body for n8n endpoint
+        n8n_payload = [
+            {
+                "company_url": company_website or "",
+                "job_description": job_description,
+                "resume_url": current_resume_url
+            }
+        ]
 
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=180)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json() 
+        n8n_response = requests.post(n8n_api_url, json=n8n_payload, timeout=180)
+        n8n_response.raise_for_status()
+        n8n_data = n8n_response.json() 
 
         resume_id_from_db = None
         try:
@@ -60,10 +62,9 @@ def analyze_resume():
             "company_website": company_website, 
             "job_description": job_description, 
             "additional_comment": additional_comment_text, 
-            "feedback_analysis": xano_data, 
+            "feedback_analysis": n8n_data, 
             "resume_id": resume_id_from_db 
         }
-
 
         try:
             insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
@@ -77,25 +78,25 @@ def analyze_resume():
                 user_uuid=current_user_id,
                 company_url=company_website,
                 original_resume_url=current_resume_url,
-                score=xano_data.get("score"),
-                improved_score=xano_data.get("improved_score"),
-                feedback=xano_data.get("feedback"),
-                new_resume_url=xano_data.get("new_resume_url")
+                score=n8n_data[0].get("score") if isinstance(n8n_data, list) and n8n_data else None,
+                improved_score=n8n_data[0].get("improved_score") if isinstance(n8n_data, list) and n8n_data else None,
+                feedback=n8n_data[0].get("feedback") if isinstance(n8n_data, list) and n8n_data else None,
+                new_resume_url=n8n_data[0].get("new_resume_url") if isinstance(n8n_data, list) and n8n_data else None
             )
             current_app.logger.info("Amplitude event sent successfully.")
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
         
-        return jsonify(xano_data), xano_response.status_code
+        return jsonify(n8n_data), n8n_response.status_code
 
     except requests.exceptions.HTTPError as http_err:
         try:
             error_detail = http_err.response.json()
         except ValueError:
             error_detail = str(http_err)
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
+        return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
+        return jsonify({"error": "Request to n8n API failed", "details": str(req_err)}), 500
     except Exception as e:
         current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
