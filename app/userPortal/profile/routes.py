@@ -48,17 +48,26 @@ def upload_linkedin_pdf():
                 if ('http' in line or 'www.' in line) and 'linkedin' not in line and not website:
                     website = line
 
-            # Find the name: look for the first line after the contact block that is not an email/URL and is likely a name
+            # Find the index after "Certifications" (or "Top Skills" if "Certifications" not found)
+            start_idx = 0
             for i, line in enumerate(lines):
-                if i < 5:  # skip contact block
-                    continue
-                # Heuristic: two words, both capitalized, not an email or URL
+                if line.lower().startswith("certifications"):
+                    start_idx = i
+                    break
+                elif line.lower().startswith("top skills"):
+                    start_idx = i
+
+            # Now, look for the name after this block
+            for i in range(start_idx, len(lines)):
+                line = lines[i]
+                # Heuristic: two words, both capitalized, not an email or URL, not a section header
                 if (
                     len(line.split()) >= 2 and
                     all(word[0].isupper() for word in line.split() if word) and
                     '@' not in line and
                     'www.' not in line and
-                    'linkedin.com' not in line
+                    'linkedin.com' not in line and
+                    not any(line.lower().startswith(h) for h in ["top skills", "certifications", "contact", "portfolio"])
                 ):
                     name = line
                     # Title is likely the next line
