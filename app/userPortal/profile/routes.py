@@ -39,28 +39,37 @@ def upload_linkedin_pdf():
             website = None
             bio = None
 
-            # Name: Usually the first non-empty line
-            if lines:
-                name = lines[0]
-
-            # Title: Next line after name
-            if len(lines) > 1:
-                title = lines[1]
-
-            # Location: Look for a line with a city/country pattern
-            for line in lines:
-                if any(loc in line for loc in ["India", "Delhi", "Germany", "Karnataka"]):
-                    location = line
-                    break
-
-            # Email, LinkedIn, Website
-            for line in lines:
+            # Find email, linkedin, website from the contact block (first 10 lines)
+            for line in lines[:10]:
                 if '@' in line and not email:
                     email = line
                 if 'linkedin.com' in line and not linkedin_url:
                     linkedin_url = line
-                if (('http' in line or 'www.' in line) and 'linkedin' not in line and not website):
+                if ('http' in line or 'www.' in line) and 'linkedin' not in line and not website:
                     website = line
+
+            # Find the name: look for the first line after the contact block that is not an email/URL and is likely a name
+            for i, line in enumerate(lines):
+                if i < 5:  # skip contact block
+                    continue
+                # Heuristic: two words, both capitalized, not an email or URL
+                if (
+                    len(line.split()) >= 2 and
+                    all(word[0].isupper() for word in line.split() if word) and
+                    '@' not in line and
+                    'www.' not in line and
+                    'linkedin.com' not in line
+                ):
+                    name = line
+                    # Title is likely the next line
+                    if i + 1 < len(lines):
+                        title = lines[i + 1]
+                    # Location is likely after title or after 'Finalist'
+                    for j in range(i + 1, min(i + 5, len(lines))):
+                        if any(loc in lines[j] for loc in ["India", "Delhi", "Germany", "Karnataka"]):
+                            location = lines[j]
+                            break
+                    break
 
             # Bio/Summary: Find the line 'Summary' and take the next few lines
             if 'Summary' in lines:
