@@ -35,6 +35,37 @@ def upload_linkedin_pdf():
             linkedin_url = None
             website = None
             bio = None
+            skills = []
+            certifications = []
+            experience_section_lines = []
+            projects_section_lines = []
+
+            # Helper to get section lines
+            def get_section(start_key, end_keys):
+                """Return list of lines in section start_key up to first end_key in end_keys"""
+                if start_key not in lines:
+                    return []
+                start_idx = lines.index(start_key) + 1
+                # default end to len(lines)
+                end_idx = len(lines)
+                for ek in end_keys:
+                    if ek in lines and lines.index(ek) > start_idx:
+                        end_idx = min(end_idx, lines.index(ek))
+                return lines[start_idx:end_idx]
+
+            # Extract sections by headings
+            skills = get_section("Top Skills", ["Certifications", "Experience", "Education", "Projects"])
+            certifications = get_section("Certifications", ["Experience", "Education", "Projects"])
+            experience_section_lines = get_section("Experience", ["Education", "Projects"])
+            projects_section_lines = get_section("Projects", ["Education"])
+
+            # Basic cleanup for skills & certifications (remove parentheses lines)
+            skills = [s for s in skills if not s.startswith("(")]
+            certifications = [c for c in certifications if not c.startswith("(")]
+
+            # Build experience list as simple paragraphs (can be refined later)
+            experience = "\n".join(experience_section_lines) if experience_section_lines else None
+            projects = "\n".join(projects_section_lines) if projects_section_lines else None
 
             # Find email, linkedin, website from the contact block (first 10 lines)
             for line in lines[:10]:
@@ -71,7 +102,11 @@ def upload_linkedin_pdf():
                 'email': email,
                 'linkedin_url': linkedin_url,
                 'website': website,
-                'bio': bio
+                'bio': bio,
+                'skills': skills or None,
+                'certifications': certifications or None,
+                'experience': experience,
+                'projects': projects
             }
 
         profile_fields = extract_profile_fields(text)
