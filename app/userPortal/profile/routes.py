@@ -28,11 +28,8 @@ def upload_linkedin_pdf():
         for page in pdf_reader.pages:
             text += page.extract_text() or ''
 
-        # Improved extraction logic for LinkedIn PDF
         def extract_profile_fields(text):
             lines = [line.strip() for line in text.split('\n') if line.strip()]
-            name = None
-            title = None
             location = None
             email = None
             linkedin_url = None
@@ -57,27 +54,11 @@ def upload_linkedin_pdf():
                 elif line.lower().startswith("top skills"):
                     start_idx = i
 
-            # Now, look for the name after this block
+            # Location: look for a line with a city/country pattern after the name/title block
             for i in range(start_idx, len(lines)):
                 line = lines[i]
-                # Heuristic: two words, both capitalized, not an email or URL, not a section header
-                if (
-                    len(line.split()) >= 2 and
-                    all(word[0].isupper() for word in line.split() if word) and
-                    '@' not in line and
-                    'www.' not in line and
-                    'linkedin.com' not in line and
-                    not any(line.lower().startswith(h) for h in ["top skills", "certifications", "contact", "portfolio"])
-                ):
-                    name = line
-                    # Title is likely the next line
-                    if i + 1 < len(lines):
-                        title = lines[i + 1]
-                    # Location is likely after title or after 'Finalist'
-                    for j in range(i + 1, min(i + 5, len(lines))):
-                        if any(loc in lines[j] for loc in ["India", "Delhi", "Germany", "Karnataka"]):
-                            location = lines[j]
-                            break
+                if any(loc in line for loc in ["India", "Delhi", "Germany", "Karnataka"]):
+                    location = line
                     break
 
             # Bio/Summary: Find the line 'Summary' and take the next few lines
@@ -86,8 +67,6 @@ def upload_linkedin_pdf():
                 bio = ' '.join(lines[idx+1:idx+5])  # Take next 4 lines as summary
 
             return {
-                'name': name,
-                'title': title,
                 'location': location,
                 'email': email,
                 'linkedin_url': linkedin_url,
