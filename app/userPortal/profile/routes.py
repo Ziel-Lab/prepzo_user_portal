@@ -88,3 +88,31 @@ def upload_linkedin_pdf():
     except Exception as e:
         current_app.logger.error(f'Failed to upload or process resume: {e}', exc_info=True)
         return jsonify({'error': 'Failed to process resume', 'details': str(e)}), 500 
+
+
+# ---------------------------------------------------------------------------
+# GET /profile – fetch the stored LinkedIn-profile data for the current user
+# ---------------------------------------------------------------------------
+
+@profile_bp.route('', methods=['GET', 'OPTIONS'])  # maps to /profile because of blueprint prefix
+@require_authentication
+def get_linkedin_profile():
+    """Return the profile record stored in the user_profiles table for the
+    authenticated user.
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
+        uid = str(g.user.id)
+        response = supabase.table('user_profiles').select('*').eq('user_id', uid).maybe_single().execute()
+
+        return jsonify({'profile': response.data if response and response.data else None}), 200
+
+    except Exception as e:
+        current_app.logger.error(f'Failed to fetch profile for user {g.user.id}: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to fetch profile', 'details': str(e)}), 500 
