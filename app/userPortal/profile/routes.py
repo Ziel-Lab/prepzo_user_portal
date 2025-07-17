@@ -2,8 +2,11 @@ from flask import request, jsonify, current_app, g
 from app.userPortal.profile import profile_bp
 from app.userPortal.subscription.helpers import require_authentication
 from app import extensions
-import PyPDF2
-import io
+import requests
+import uuid
+
+# Supabase storage bucket used for user-uploaded resumes
+SUPABASE_BUCKET = "user-documents"
 
 @profile_bp.route('/upload-linkedin-pdf', methods=['POST', 'OPTIONS'])
 @require_authentication
@@ -22,106 +25,66 @@ def upload_linkedin_pdf():
         return jsonify({'error': 'Only PDF files are allowed'}), 400
 
     try:
+        # --- 1. Upload the resume to Supabase Storage ---
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
         file_bytes = file.read()
-        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-        text = ''
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ''
-
-        def extract_profile_fields(text):
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            location = None
-            email = None
-            linkedin_url = None
-            website = None
-            bio = None
-            skills = []
-            certifications = []
-            experience_section_lines = []
-            projects_section_lines = []
-
-            # Helper to get section lines
-            def get_section(start_key, end_keys):
-                """Return list of lines in section start_key up to first end_key in end_keys"""
-                if start_key not in lines:
-                    return []
-                start_idx = lines.index(start_key) + 1
-                # default end to len(lines)
-                end_idx = len(lines)
-                for ek in end_keys:
-                    if ek in lines and lines.index(ek) > start_idx:
-                        end_idx = min(end_idx, lines.index(ek))
-                return lines[start_idx:end_idx]
-
-            # Extract sections by headings
-            skills = get_section("Top Skills", ["Certifications", "Experience", "Education", "Projects"])
-            certifications = get_section("Certifications", ["Experience", "Education", "Projects"])
-            experience_section_lines = get_section("Experience", ["Education", "Projects"])
-            projects_section_lines = get_section("Projects", ["Education"])
-
-            # Basic cleanup for skills & certifications (remove parentheses lines)
-            skills = [s for s in skills if not s.startswith("(")]
-            certifications = [c for c in certifications if not c.startswith("(")]
-
-            # Build experience list as simple paragraphs (can be refined later)
-            experience = "\n".join(experience_section_lines) if experience_section_lines else None
-            projects = "\n".join(projects_section_lines) if projects_section_lines else None
-
-            # Find email, linkedin, website from the contact block (first 10 lines)
-            for line in lines[:10]:
-                if '@' in line and not email:
-                    email = line
-                if 'linkedin.com' in line and not linkedin_url:
-                    linkedin_url = line
-                if ('http' in line or 'www.' in line) and 'linkedin' not in line and not website:
-                    website = line
-
-            # Find the index after "Certifications" (or "Top Skills" if "Certifications" not found)
-            start_idx = 0
-            for i, line in enumerate(lines):
-                if line.lower().startswith("certifications"):
-                    start_idx = i
-                    break
-                elif line.lower().startswith("top skills"):
-                    start_idx = i
-
-            # Location: look for a line with a city/country pattern after the name/title block
-            for i in range(start_idx, len(lines)):
-                line = lines[i]
-                if any(loc in line for loc in ["India", "Delhi", "Germany", "Karnataka"]):
-                    location = line
-                    break
-
-            # Bio/Summary: Find the line 'Summary' and take the next few lines
-            if 'Summary' in lines:
-                idx = lines.index('Summary')
-                bio = ' '.join(lines[idx+1:idx+5])  # Take next 4 lines as summary
-
-            return {
-                'location': location,
-                'email': email,
-                'linkedin_url': linkedin_url,
-                'website': website,
-                'bio': bio,
-                'skills': skills or None,
-                'certifications': certifications or None,
-                'experience': experience,
-                'projects': projects
-            }
-
-        profile_fields = extract_profile_fields(text)
         user_id = str(g.user.id)
+        unique_file_name = f"{uuid.uuid4()}_{file.filename}"
+        storage_path = f"{user_id}/{unique_file_name}"
+
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
+            storage_path,
+            file_bytes,
+            file_options={
+                "content-type": "application/pdf",
+                "content-disposition": f'inline; filename="{file.filename}"'
+            }
+        )
+
+        public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
+
+        # --- 2. Call the n8n webhook to extract profile data ---
+        webhook_url = "https://prepzo.app.n8n.cloud/webhook/fetch_profile"
+        webhook_response = requests.post(webhook_url, json={"resume_url": public_url}, timeout=60)
+
+        if webhook_response.status_code != 200:
+            current_app.logger.error(f'n8n webhook call failed: {webhook_response.text}')
+            return jsonify({'error': 'Failed to extract profile', 'details': webhook_response.text}), 500
+
+        webhook_json = webhook_response.json()
+        output = webhook_json.get('output', webhook_json)
+
+        # --- 3. Prepare data for insertion into Supabase ---
+        profile_fields = {
+            'name': output.get('name'),
+            'title': output.get('title'),
+            'bio': output.get('bio'),
+            'location': output.get('location'),
+            'email': output.get('email'),
+            'phone': output.get('phone'),
+            'linkedin_url': output.get('linkedin_url'),
+            'website': output.get('website'),
+            'skills': output.get('skills'),
+            'certifications': output.get('certification') or output.get('certifications'),
+            'experience': output.get('experience'),
+            'projects': output.get('projects'),
+            'resume_url': public_url
+        }
+
         profile_data = {'user_id': user_id, **profile_fields}
 
-        # Insert into Supabase user_profiles table
-        supabase = extensions.supabase
+        # --- 4. Upsert into Supabase ---
         insert_result = supabase.table('user_profiles').upsert(profile_data, on_conflict='user_id').execute()
 
         return jsonify({
-            'extracted_text': text,
             'profile_data': profile_data,
-            'db_result': insert_result.data if hasattr(insert_result, 'data') else str(insert_result)
+            'db_result': insert_result.data if hasattr(insert_result, 'data') else str(insert_result),
+            'webhook_output': output
         }), 200
+
     except Exception as e:
-        current_app.logger.error(f'Failed to extract PDF or insert profile: {e}')
-        return jsonify({'error': 'Failed to extract PDF or insert profile', 'details': str(e)}), 500 
+        current_app.logger.error(f'Failed to upload or process resume: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to process resume', 'details': str(e)}), 500 
