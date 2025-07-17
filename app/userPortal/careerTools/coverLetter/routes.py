@@ -14,46 +14,49 @@ def create_cover_letter():
     current_user_id = str(g.user.id)
 
     frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
-    xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
+
+    # Use the n8n webhook for cover-letter generation instead of the legacy Xano endpoint
+    n8n_api_url_cover_letter = "https://prepzo.app.n8n.cloud/webhook/cover-letter"
 
     try:
-        data = request.form
-        current_resume_url = data.get("current_resume")
+        # Accept either JSON or form-encoded payloads for maximum compatibility with clients
+        data = request.get_json(silent=True) if request.is_json else request.form
+
+        # Map legacy field names (used by previous Xano integration) to the new n8n parameter names
+        current_resume_url = data.get("current_resume") or data.get("resume_url")
         job_description_text = data.get("job_description")
-        company_website_text = data.get("company_website")
+        company_website_text = data.get("company_website") or data.get("company_url")
         user_additional_comments_text = data.get("additional_comments")
 
         if not all([current_resume_url, job_description_text]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
-        xano_payload = {
-            "current_resume": current_resume_url,
+        # n8n expects the following payload keys
+        n8n_payload = {
+            "resume_url": current_resume_url,
+            "company_url": company_website_text,
             "job_description": job_description_text,
-            "company_website": company_website_text,
             "additional_comments": user_additional_comments_text
         }
 
-        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json()
+        n8n_response = requests.post(n8n_api_url_cover_letter, json=n8n_payload, timeout=180)
+        n8n_response.raise_for_status()
 
-        parsed_feedback_from_xano = None
-        raw_feedback_payload_str = xano_data.get("feedback")
+        n8n_data = n8n_response.json()
 
-        if isinstance(raw_feedback_payload_str, str):
-            try:
-                parsed_feedback_from_xano = json.loads(raw_feedback_payload_str)
-            except json.JSONDecodeError as e:
-                print(f"Cover Letter: Error decoding JSON string from Xano 'feedback' key: {e}. Storing raw string or null.")
-                parsed_feedback_from_xano = {"error": "Failed to parse feedback string", "raw_feedback": raw_feedback_payload_str}
+        # The webhook returns a list with a single element containing an 'output' object
+        parsed_feedback_from_xano = None  # kept variable name for DB compatibility
 
-        elif raw_feedback_payload_str is not None: # It exists but is not a string
-             print(f"Cover Letter: Xano 'feedback' key present but not a string. Type: {type(raw_feedback_payload_str)}")
-             parsed_feedback_from_xano = {"error": "Feedback key not a string", "raw_feedback": raw_feedback_payload_str}
-        else: # feedback key is missing
-            print(f"Cover Letter: Xano 'feedback' key missing in response.")
-            parsed_feedback_from_xano = {"error": "Feedback key missing in Xano response"}
-
+        try:
+            if isinstance(n8n_data, list) and len(n8n_data) > 0 and isinstance(n8n_data[0], dict):
+                parsed_feedback_from_xano = n8n_data[0].get("output")
+                if parsed_feedback_from_xano is None:
+                    raise ValueError("'output' key missing in n8n response item")
+            else:
+                raise ValueError("Unexpected n8n response format – expected list with first item as dict")
+        except Exception as e:
+            print(f"Cover Letter: Failed to parse n8n response: {e}. Raw response: {n8n_data}")
+            parsed_feedback_from_xano = {"error": "Unexpected response format", "raw_response": n8n_data}
 
 
         db_payload = {
@@ -75,13 +78,13 @@ def create_cover_letter():
         # Send the event to Amplitude
         try:
             cover_letter_event(
-            current_user_id,
-            company_website_text,           
-            current_resume_url,             
-            xano_data.get("cover_letter"),              
-            user_additional_comments_text,  
-            parsed_feedback_from_xano       
-        )
+                current_user_id,
+                company_website_text,
+                current_resume_url,
+                (parsed_feedback_from_xano or {}).get("cover_letter"),
+                user_additional_comments_text,
+                parsed_feedback_from_xano,
+            )
         except Exception as e:
             current_app.logger.warning(f"Failed to send Amplitude event: {e}")
 
@@ -89,11 +92,12 @@ def create_cover_letter():
             return jsonify(parsed_feedback_from_xano), 200
         else: 
             error_detail_for_client = parsed_feedback_from_xano if parsed_feedback_from_xano else {"error": "Processing Xano response failed"}
-            return jsonify({"message": "Xano request processed, but there was an issue with feedback content.", 
-                            "xano_response_status": xano_response.status_code,
-                            "details": error_detail_for_client,
-                            "full_xano_response_preview": xano_data if 'feedback' not in xano_data else {k:v for k,v in xano_data.items() if k != 'feedback'}
-                           }), 207
+            return jsonify({
+                "message": "n8n request processed, but there was an issue with feedback content.",
+                "n8n_response_status": n8n_response.status_code,
+                "details": error_detail_for_client,
+                "raw_n8n_response": n8n_data,
+            }), 207
 
 
     except requests.exceptions.HTTPError as http_err:
@@ -101,9 +105,9 @@ def create_cover_letter():
             error_detail = http_err.response.json()
         except ValueError:
             error_detail = str(http_err.response.text) 
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
+        return jsonify({"error": "n8n webhook request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
+        return jsonify({"error": "Request to n8n webhook failed", "details": str(req_err)}), 500
     except Exception as e:
         print(f"Unexpected error in create_cover_letter: {str(e)}")
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
