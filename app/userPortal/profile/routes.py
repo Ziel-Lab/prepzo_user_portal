@@ -111,7 +111,7 @@ def get_linkedin_profile():
         uid = str(g.user.id)
         response = supabase.table('user_profiles').select('*').eq('user_id', uid).maybe_single().execute()
 
-        return jsonify({'profile': response.data if response and response.data else None}), 200
+        return jsonify({'db_result': response.data if response and response.data else None}), 200
 
     except Exception as e:
         current_app.logger.error(f'Failed to fetch profile for user {g.user.id}: {e}', exc_info=True)
