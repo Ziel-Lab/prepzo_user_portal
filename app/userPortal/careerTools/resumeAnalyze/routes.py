@@ -18,7 +18,7 @@ def analyze_resume():
     # We no longer call n8n from here – we only create a pending job
     
     try:
-        data = request.form
+        data = request.get_json(silent=True) if request.is_json else request.form
         current_resume_url = data.get("current_resume") 
         job_description = data.get("job_description")
         company_website = data.get("company_website")
