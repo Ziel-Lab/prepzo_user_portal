@@ -7,15 +7,15 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 from app.utils.amplitude import resume_analyze_event
 from . import resume_analyze_bp 
 
-@resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
+@resume_analyze_bp.route("/analyze-resume", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature('resume')
+@check_and_use_feature('resume', increment_by=0)   # ← check only, no debit yet
 def analyze_resume():
     current_user_id = str(g.user.id)
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-    n8n_api_url = "https://prepzo.app.n8n.cloud/webhook/resume_generator"
+    # We no longer call n8n from here – we only create a pending job
     
     try:
         data = request.form
@@ -27,18 +27,8 @@ def analyze_resume():
         if not all([current_resume_url, job_description]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
-        # Prepare request body for n8n endpoint
-        n8n_payload = [
-            {
-                "company_url": company_website or "",
-                "job_description": job_description,
-                "resume_url": current_resume_url
-            }
-        ]
-
-        n8n_response = requests.post(n8n_api_url, json=n8n_payload, timeout=180)
-        n8n_response.raise_for_status()
-        n8n_data = n8n_response.json() 
+        import uuid
+        job_id = str(uuid.uuid4())  # correlation id for this analysis job
 
         resume_id_from_db = None
         try:
@@ -58,12 +48,15 @@ def analyze_resume():
         db_payload = {
             "user_id": current_user_id,
             "user_name": user_name,
-            "current_resume": current_resume_url, 
-            "company_website": company_website, 
-            "job_description": job_description, 
-            "additional_comment": additional_comment_text, 
-            "feedback_analysis": n8n_data, 
-            "resume_id": resume_id_from_db 
+            "job_id": job_id,
+            "current_resume": current_resume_url,
+            "company_website": company_website,
+            "job_description": job_description,
+            "additional_comment": additional_comment_text,
+            "status": "PENDING",
+            "feedback_analysis": None,
+            "resume_id": resume_id_from_db,
+            "created_at": "now()",
         }
 
         try:
@@ -73,21 +66,15 @@ def analyze_resume():
         except Exception as e:
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
         
-        try:
-            resume_analyze_event(
-                user_uuid=current_user_id,
-                company_url=company_website,
-                original_resume_url=current_resume_url,
-                score=n8n_data[0].get("score") if isinstance(n8n_data, list) and n8n_data else None,
-                improved_score=n8n_data[0].get("improved_score") if isinstance(n8n_data, list) and n8n_data else None,
-                feedback=n8n_data[0].get("feedback") if isinstance(n8n_data, list) and n8n_data else None,
-                new_resume_url=n8n_data[0].get("new_resume_url") if isinstance(n8n_data, list) and n8n_data else None
-            )
-            current_app.logger.info("Amplitude event sent successfully.")
-        except Exception as e:
-            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
-        
-        return jsonify(n8n_data), n8n_response.status_code
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "message": "Resume analysis has been queued and is now pending.",
+                }
+            ),
+            202,
+        )
 
     except requests.exceptions.HTTPError as http_err:
         try:
@@ -105,14 +92,33 @@ def analyze_resume():
 @require_authentication
 def get_analyze_resume():
     current_user_id = str(g.user.id)
-
     try:
-        query_response = extensions.supabase.table("analyze_resume") \
-            .select("*") \
-            .eq("user_id", current_user_id) \
-            .execute()
+        job_id_param = request.args.get("job_id")
 
-        return jsonify(query_response.data or []), 200
+        if job_id_param:
+            query_response = (
+                extensions.supabase.table("analyze_resume")
+                .select("*")
+                .eq("user_id", current_user_id)
+                .eq("job_id", job_id_param)
+                .maybe_single()
+                .execute()
+            )
+        else:
+            query_response = (
+                extensions.supabase.table("analyze_resume")
+                .select("*")
+                .eq("user_id", current_user_id)
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+        if query_response is None:
+            return jsonify(None), 200
+
+        result_data = getattr(query_response, "data", query_response)
+        return jsonify(result_data or None), 200
         
     except Exception as e:
         current_app.logger.error(f"Error fetching from analyze_resume table: {str(e)}")
