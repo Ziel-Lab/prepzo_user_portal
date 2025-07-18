@@ -67,10 +67,13 @@ def create_cover_letter():
 def get_cover_letters():
     current_user_id = str(g.user.id)
     try:
+        # Fetch only the most-recent entry for the current user
         query_response = (
             extensions.supabase.table("cover_letter")
-            .select("*")  
+            .select("*")
             .eq("uid", current_user_id)
+            .order("created_at", desc=True)
+            .limit(1)
             .execute()
         )
         return jsonify(query_response.data or []), 200
