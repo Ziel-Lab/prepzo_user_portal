@@ -6,6 +6,7 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 from app.utils.amplitude import cover_letter_event
 
 from . import cover_letter_bp 
+import uuid
 
 @cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
 @require_authentication
@@ -33,13 +34,16 @@ def create_cover_letter():
         if not all([current_resume_url, job_description_text]):
             return jsonify({"error": "Missing required fields: current_resume (or resume_url) and job_description"}), 400
 
+        job_id = str(uuid.uuid4())
+
         n8n_payload = {
             "resume_url": current_resume_url,
             "company_url": company_website_text,
             "job_description": job_description_text,
             "additional_comments": user_additional_comments_text,
             # Pass the user ID to the webhook so it can associate the result correctly
-            "user_id": str(g.user.id)
+            "user_id": str(g.user.id),
+            "job_id": job_id
         }
         
         # Trigger the n8n webhook but don't wait for it to finish.
@@ -55,7 +59,7 @@ def create_cover_letter():
             return jsonify({"error": "Failed to trigger cover letter generation process."}), 500
 
         # The job was successfully accepted for processing.
-        return jsonify({"message": "Cover letter generation has been started."}), 202
+        return jsonify({"job_id": job_id, "message": "Cover letter generation has been started."}), 202
 
     except Exception as e:
         current_app.logger.error(f"Unexpected error in create_cover_letter: {str(e)}")
@@ -67,16 +71,29 @@ def create_cover_letter():
 def get_cover_letters():
     current_user_id = str(g.user.id)
     try:
-        # Fetch only the most-recent entry for the current user
-        query_response = (
-            extensions.supabase.table("cover_letter")
-            .select("*")
-            .eq("uid", current_user_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        return jsonify(query_response.data or []), 200
+        job_id_param = request.args.get("job_id")
+
+        if job_id_param:
+            # Attempt to fetch the specific cover letter generated for this job_id
+            query_response = (
+                extensions.supabase.table("cover_letter")
+                .select("*")
+                .eq("uid", current_user_id)
+                .eq("job_id", job_id_param)
+                .maybe_single()
+                .execute()
+            )
+        else:
+            # Fallback: return the most-recent cover letter for the user
+            query_response = (
+                extensions.supabase.table("cover_letter")
+                .select("*")
+                .eq("uid", current_user_id)
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+        return jsonify(query_response.data or None), 200
     except Exception as e:
         print(f"Error fetching from cover_letter table: {str(e)}")
         return jsonify({"error": f"Could not retrieve cover letters: {str(e)}"}), 500
