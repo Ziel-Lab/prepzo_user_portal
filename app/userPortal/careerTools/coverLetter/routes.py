@@ -93,7 +93,13 @@ def get_cover_letters():
                 .limit(1)
                 .execute()
             )
-        return jsonify(query_response.data or None), 200
+
+        # Supabase v2 may return dict/None instead of PostgrestResponse.
+        if query_response is None:
+            return jsonify(None), 200
+
+        result_data = getattr(query_response, "data", query_response)
+        return jsonify(result_data or None), 200
     except Exception as e:
         print(f"Error fetching from cover_letter table: {str(e)}")
         return jsonify({"error": f"Could not retrieve cover letters: {str(e)}"}), 500
