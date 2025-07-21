@@ -9,7 +9,7 @@ from . import resume_analyze_bp
 
 @resume_analyze_bp.route("/analyze-resume", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature('resume', increment_by=0)   # ← check only, no debit yet
+@check_and_use_feature('resume', auto_increment=False)   # ← check only, no debit yet
 def analyze_resume():
     current_user_id = str(g.user.id)
     user_name = g.user.user_metadata.get('name') or \
