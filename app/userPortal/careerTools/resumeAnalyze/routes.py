@@ -100,8 +100,7 @@ def get_analyze_resume():
                 extensions.supabase.table("analyze_resume")
                 .select("*")
                 .eq("user_id", current_user_id)
-                .eq("job_id", job_id_param)
-                .maybe_single()
+                .order("created_at", desc=True)
                 .execute()
             )
         else:
@@ -109,8 +108,7 @@ def get_analyze_resume():
                 extensions.supabase.table("analyze_resume")
                 .select("*")
                 .eq("user_id", current_user_id)
-                .order("id", desc=True)
-                .limit(1)
+                .order("created_at", desc=True)
                 .execute()
             )
 
