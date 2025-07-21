@@ -199,7 +199,27 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
                 
                 # Step 4: Check if the period is expired or if no record exists.
                 today = date.today()
-                is_expired = usage_record and today > datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
+                # Safely determine if the current usage period has expired.
+                # Handle the case where `period_end` might be NULL or in an unexpected format to avoid
+                # `TypeError: strptime() argument 1 must be str, not None` reported in production.
+                period_end_str = usage_record.get('period_end') if usage_record else None
+
+                is_expired = False
+                if usage_record:
+                    if period_end_str:
+                        try:
+                            period_end_date = datetime.strptime(period_end_str, '%Y-%m-%d').date()
+                            is_expired = today > period_end_date
+                        except (TypeError, ValueError):
+                            # Malformed date string – treat as expired to force creation of a fresh record
+                            current_app.logger.warning(
+                                f"Invalid period_end value '{period_end_str}' for user {uid}. Treating as expired.")
+                            is_expired = True
+                    else:
+                        # Missing period_end value – treat as expired so that a new record is created
+                        current_app.logger.warning(
+                            f"Missing period_end for user {uid}. Treating current usage period as expired.")
+                        is_expired = True
                 
                 if not usage_record or is_expired:
                     if is_expired:
