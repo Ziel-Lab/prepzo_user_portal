@@ -10,7 +10,7 @@ import uuid
 
 @cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature('cover_letter')
+@check_and_use_feature('cover_letter', auto_increment=False)
 def create_cover_letter():
     """
     Asynchronously triggers a long-running n8n workflow to generate a cover letter.

@@ -157,7 +157,7 @@ def handle_period_rollover(supabase, uid, subscription):
              current_app.logger.error(error_msg)
              raise Exception(error_msg)
 
-def check_and_use_feature(feature_name, increment_by=1):
+def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
     """
     Decorator that checks a user's feature usage against their plan limits.
     It identifies the current usage period and handles rollovers by creating a new
@@ -262,26 +262,16 @@ def check_and_use_feature(feature_name, increment_by=1):
 
             # --- PRE-CHECK COMPLETE ---
             
-            # Execute the original function.
             response, status_code = f(*args, **kwargs)
 
-            # Only if the function was successful, increment the usage.
-            if 200 <= status_code < 300:
-                try:
-                    current_app.logger.info(f"Feature '{feature_name}' used successfully. Incrementing usage for user {uid}.")
-                    
-                    # Use a remote procedure call (RPC) to safely increment the value.
-                    # This prevents race conditions where two requests could overwrite each other's updates.
-                    supabase.rpc('increment_feature_counters', {
-                        'p_user_id': uid,
-                        'p_period_start': usage_record['period_start'],
-                        'p_feature_base_name': feature_name,
-                        'p_increment_by': increment_by
-                    }).execute()
-
-                except APIError as e:
-                    current_app.logger.error(f"CRITICAL: Failed to increment usage for user {uid} via RPC. Details: {e}", exc_info=True)
-                
+            # Only increment if we’re told to
+            if auto_increment and 200 <= status_code < 300:
+                supabase.rpc('increment_feature_counters', {
+                    'p_user_id': uid,
+                    'p_period_start': usage_record['period_start'],
+                    'p_feature_base_name': feature_name,
+                    'p_increment_by': increment_by
+                }).execute()
             return response, status_code
         
         return decorated_function
