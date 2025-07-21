@@ -69,6 +69,7 @@ def get_cover_letters():
             query_response = (
                 extensions.supabase.table("cover_letter")
                 .select("*")
+                .eq("job_id", job_id_param)
                 .eq("uid", current_user_id)
                 .execute()
             )
@@ -78,7 +79,7 @@ def get_cover_letters():
                 extensions.supabase.table("cover_letter")
                 .select("*")
                 .eq("uid", current_user_id)
-                .order("created_at", desc=True)
+                .order("id", desc=True)
                 .execute()
             )
 
