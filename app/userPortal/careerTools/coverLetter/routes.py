@@ -78,8 +78,7 @@ def get_cover_letters():
                 extensions.supabase.table("cover_letter")
                 .select("*")
                 .eq("uid", current_user_id)
-                .order("id", desc=True)
-                .limit(1)
+                .order("created_at", desc=True)
                 .execute()
             )
 
