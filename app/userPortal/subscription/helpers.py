@@ -157,7 +157,7 @@ def handle_period_rollover(supabase, uid, subscription):
              current_app.logger.error(error_msg)
              raise Exception(error_msg)
 
-def check_and_use_feature(feature_name, increment_by=0):
+def check_and_use_feature(feature_name, increment_by=1):
     """
     Decorator that checks a user's feature usage against their plan limits.
     It identifies the current usage period and handles rollovers by creating a new
