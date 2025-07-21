@@ -70,8 +70,6 @@ def get_cover_letters():
                 extensions.supabase.table("cover_letter")
                 .select("*")
                 .eq("uid", current_user_id)
-                .eq("status", "SUCCESS")
-                .maybe_single()
                 .execute()
             )
         else:
