@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 import os
 import magic
+import time
 from app import extensions
 from . import upload_bp 
 
@@ -65,8 +66,9 @@ def upload_document():
             print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
 
 
-    # Construct a unique path in storage using user ID and original filename
-    storage_file_path = f"{current_user_id}/{file.filename}"
+    # Construct a unique path in storage using user ID, timestamp, and original filename
+    timestamp = str(int(time.time()))
+    storage_file_path = f"{current_user_id}/{timestamp}_{file.filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
 
@@ -74,12 +76,22 @@ def upload_document():
         extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
             storage_file_path,  # Use the unique path for storage
             file_bytes,
-            file_options={
-                "content-type": final_content_type_for_storage,
-                "content-disposition": f'inline; filename="{file.filename}"'
-            }
+            file_options={"content-type": final_content_type_for_storage}
         )
         public_url = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_file_path) # Get URL based on unique path
+
+        # Check if document with same name already exists for this user
+        try:
+            existing_doc_check = extensions.supabase.table("user_documents") \
+                .select("id") \
+                .eq("uid", current_user_id) \
+                .eq("document_name", file.filename) \
+                .execute()
+            
+            has_existing_file = existing_doc_check.data and len(existing_doc_check.data) > 0
+        except Exception as e:
+            # If query fails, assume no existing file
+            has_existing_file = False
 
         document_data = {
             "uid": current_user_id,
@@ -89,6 +101,10 @@ def upload_document():
             "display_name": user_display_name,
             "document_comments": document_comments
         }
+
+        # Only add status if this is a replacement file
+        if has_existing_file:
+            document_data["status"] = "Updated"
 
         data, _ = extensions.supabase.table("user_documents").insert(document_data).execute()
         return jsonify({"message": "File uploaded", "file_url": public_url, "db_response": data}), 201
