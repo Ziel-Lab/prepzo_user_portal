@@ -10,33 +10,7 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 from app.utils.amplitude import resume_analyze_event
 from . import resume_analyze_bp 
 
-<<<<<<< HEAD
 @resume_analyze_bp.route("/analyze-resume", methods=["POST", "OPTIONS"])
-=======
-def background_db_and_analytics(db_payload, amplitude_payload=None):
-    """Fire-and-forget background processing for DB inserts and analytics"""
-    try:
-        insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-        if not insert_response.data:
-            logging.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
-    except Exception as e:
-        logging.error(f"Background DB insert failed: {str(e)}")
-    
-    if amplitude_payload:
-        try:
-            resume_analyze_event(**amplitude_payload)
-            logging.info("Amplitude event sent successfully.")
-        except Exception as e:
-            logging.warning(f"Background Amplitude event failed: {e}")
-
-def get_request_data():
-    """Unified request data handling for both JSON and form data"""
-    if request.is_json:
-        return request.get_json() or {}
-    return request.form.to_dict()
-
-@resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
 @require_authentication
 @check_and_use_feature('resume', auto_increment=False)   # ← check only, no debit yet
 def analyze_resume():
@@ -47,11 +21,7 @@ def analyze_resume():
     # We no longer call n8n from here – we only create a pending job
     
     try:
-<<<<<<< HEAD
         data = request.get_json(silent=True) if request.is_json else request.form
-=======
-        data = get_request_data()
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
         current_resume_url = data.get("current_resume") 
         job_description = data.get("job_description")
         company_website = data.get("company_website")
@@ -60,22 +30,8 @@ def analyze_resume():
         if not all([current_resume_url, job_description]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
-<<<<<<< HEAD
         import uuid
         job_id = str(uuid.uuid4())  # correlation id for this analysis job
-=======
-        xano_payload = {
-            "current_resume": current_resume_url,
-            "job_description": job_description,
-            "company_website": company_website,
-            "additional_comments": additional_comment_text
-        }
-
-        # Increase timeout and add better error handling
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=200)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json() 
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
 
         # Prepare background tasks but don't block on them
         resume_id_from_db = None
@@ -105,7 +61,6 @@ def analyze_resume():
             "created_at": "now()",
         }
 
-<<<<<<< HEAD
         try:
             insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
             if not insert_response.data:
@@ -122,27 +77,6 @@ def analyze_resume():
             ),
             202,
         )
-=======
-        amplitude_payload = {
-            "user_uuid": current_user_id,
-            "company_url": company_website,
-            "original_resume_url": current_resume_url,
-            "score": xano_data.get("score"),
-            "improved_score": xano_data.get("improved_score"),
-            "feedback": xano_data.get("feedback"),
-            "new_resume_url": xano_data.get("new_resume_url")
-        }
-
-        # Fire-and-forget background processing
-        Thread(
-            target=background_db_and_analytics, 
-            args=(db_payload, amplitude_payload), 
-            daemon=True
-        ).start()
-        
-        # Return immediately after Xano success
-        return jsonify(xano_data), xano_response.status_code
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
 
     except requests.exceptions.Timeout:
         logging.error("Resume analysis request timed out")
@@ -154,12 +88,7 @@ def analyze_resume():
             error_detail = str(http_err)
         return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
-<<<<<<< HEAD
         return jsonify({"error": "Request to n8n API failed", "details": str(req_err)}), 500
-=======
-        logging.error(f"Request to Xano API failed: {str(req_err)}")
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
     except Exception as e:
         logging.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
@@ -342,10 +271,5 @@ def roast_resume():
         logging.error(f"Request to Xano API failed: {str(req_err)}")
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
-<<<<<<< HEAD
         current_app.logger.error(f"Unexpected error in roast_resume: {str(e)}")
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
-=======
-        logging.error(f"Unexpected error in roast_resume: {str(e)}")
-        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132

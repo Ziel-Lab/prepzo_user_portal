@@ -46,60 +46,21 @@ def create_cover_letter():
     n8n_api_url_cover_letter = "https://prepzo.app.n8n.cloud/webhook/cover-letter"
 
     try:
-<<<<<<< HEAD
         data = request.get_json(silent=True) if request.is_json else request.form
         if not data:
             return jsonify({"error": "Invalid or missing request body"}), 400
 
         current_resume_url = data.get("current_resume") or data.get("resume_url")
-=======
-        data = get_request_data()
-        current_resume_url = data.get("current_resume")
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
         job_description_text = data.get("job_description")
         company_website_text = data.get("company_website") or data.get("company_url")
         user_additional_comments_text = data.get("additional_comments")
 
         if not all([current_resume_url, job_description_text]):
-<<<<<<< HEAD
             return jsonify({"error": "Missing required fields: current_resume (or resume_url) and job_description"}), 400
 
         job_id = str(uuid.uuid4())
 
         # Save pending job to database
-=======
-            return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
-
-        xano_payload = {
-            "current_resume": current_resume_url,
-            "job_description": job_description_text,
-            "company_website": company_website_text,
-            "additional_comments": user_additional_comments_text
-        }
-
-        # Increase timeout for better reliability
-        xano_response = requests.post(xano_api_url_cover_letter, json=xano_payload, timeout=200)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json()
-
-        parsed_feedback_from_xano = None
-        raw_feedback_payload_str = xano_data.get("feedback")
-
-        if isinstance(raw_feedback_payload_str, str):
-            try:
-                parsed_feedback_from_xano = json.loads(raw_feedback_payload_str)
-            except json.JSONDecodeError as e:
-                print(f"Cover Letter: Error decoding JSON string from Xano 'feedback' key: {e}. Storing raw string or null.")
-                parsed_feedback_from_xano = {"error": "Failed to parse feedback string", "raw_feedback": raw_feedback_payload_str}
-
-        elif raw_feedback_payload_str is not None: # It exists but is not a string
-             print(f"Cover Letter: Xano 'feedback' key present but not a string. Type: {type(raw_feedback_payload_str)}")
-             parsed_feedback_from_xano = {"error": "Feedback key not a string", "raw_feedback": raw_feedback_payload_str}
-        else: # feedback key is missing
-            print(f"Cover Letter: Xano 'feedback' key missing in response.")
-            parsed_feedback_from_xano = {"error": "Feedback key missing in Xano response"}
-
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
         db_payload = {
             "uid": str(g.user.id),
             "job_id": job_id,
@@ -115,44 +76,6 @@ def create_cover_letter():
         
         return jsonify({"job_id": job_id, "message": "Cover letter generation has been started."}), 202
 
-<<<<<<< HEAD
-=======
-        amplitude_payload = {
-            "user_uuid": current_user_id,
-            "company_url": company_website_text,           
-            "original_resume_url": current_resume_url,             
-            "cover_letter": xano_data.get("cover_letter"),              
-            "additional_comments": user_additional_comments_text,  
-            "feedback": parsed_feedback_from_xano       
-        }
-
-        # Fire-and-forget background processing
-        Thread(
-            target=background_db_and_analytics, 
-            args=(db_payload, amplitude_payload), 
-            daemon=True
-        ).start()
-
-        # Return immediately after Xano success
-        if parsed_feedback_from_xano and "error" not in parsed_feedback_from_xano:
-            return jsonify(parsed_feedback_from_xano), 200
-        else: 
-            error_detail_for_client = parsed_feedback_from_xano if parsed_feedback_from_xano else {"error": "Processing Xano response failed"}
-            return jsonify({"message": "Xano request processed, but there was an issue with feedback content.", 
-                            "xano_response_status": xano_response.status_code,
-                            "details": error_detail_for_client,
-                            "full_xano_response_preview": xano_data if 'feedback' not in xano_data else {k:v for k,v in xano_data.items() if k != 'feedback'}
-                           }), 207
-
-    except requests.exceptions.HTTPError as http_err:
-        try:
-            error_detail = http_err.response.json()
-        except ValueError:
-            error_detail = str(http_err.response.text) 
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
-    except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
->>>>>>> 27ce8f9a2bf2db39c1d3128d774d35244ae0f132
     except Exception as e:
         current_app.logger.error(f"Unexpected error in create_cover_letter: {str(e)}")
         return jsonify({"error": "An unexpected error occurred."}), 500
