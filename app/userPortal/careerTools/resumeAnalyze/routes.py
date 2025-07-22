@@ -7,18 +7,18 @@ from app.userPortal.subscription.helpers import require_authentication, check_an
 from app.utils.amplitude import resume_analyze_event
 from . import resume_analyze_bp 
 
-@resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
+@resume_analyze_bp.route("/analyze-resume", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature('resume')
+@check_and_use_feature('resume', auto_increment=False)   # ← check only, no debit yet
 def analyze_resume():
     current_user_id = str(g.user.id)
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
+    # We no longer call n8n from here – we only create a pending job
     
     try:
-        data = request.form
+        data = request.get_json(silent=True) if request.is_json else request.form
         current_resume_url = data.get("current_resume") 
         job_description = data.get("job_description")
         company_website = data.get("company_website")
@@ -27,16 +27,8 @@ def analyze_resume():
         if not all([current_resume_url, job_description]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
-        xano_payload = {
-            "current_resume": current_resume_url,
-            "job_description": job_description,
-            "company_website": company_website,
-            "additional_comments": additional_comment_text
-        }
-
-        xano_response = requests.post(xano_api_url_resume_analyze, json=xano_payload, timeout=180)
-        xano_response.raise_for_status()
-        xano_data = xano_response.json() 
+        import uuid
+        job_id = str(uuid.uuid4())  # correlation id for this analysis job
 
         resume_id_from_db = None
         try:
@@ -56,14 +48,16 @@ def analyze_resume():
         db_payload = {
             "user_id": current_user_id,
             "user_name": user_name,
-            "current_resume": current_resume_url, 
-            "company_website": company_website, 
-            "job_description": job_description, 
-            "additional_comment": additional_comment_text, 
-            "feedback_analysis": xano_data, 
-            "resume_id": resume_id_from_db 
+            "job_id": job_id,
+            "current_resume": current_resume_url,
+            "company_website": company_website,
+            "job_description": job_description,
+            "additional_comment": additional_comment_text,
+            "status": "PENDING",
+            "feedback_analysis": None,
+            "resume_id": resume_id_from_db,
+            "created_at": "now()",
         }
-
 
         try:
             insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
@@ -72,30 +66,24 @@ def analyze_resume():
         except Exception as e:
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
         
-        try:
-            resume_analyze_event(
-                user_uuid=current_user_id,
-                company_url=company_website,
-                original_resume_url=current_resume_url,
-                score=xano_data.get("score"),
-                improved_score=xano_data.get("improved_score"),
-                feedback=xano_data.get("feedback"),
-                new_resume_url=xano_data.get("new_resume_url")
-            )
-            current_app.logger.info("Amplitude event sent successfully.")
-        except Exception as e:
-            current_app.logger.warning(f"Failed to send Amplitude event: {e}")
-        
-        return jsonify(xano_data), xano_response.status_code
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "message": "Resume analysis has been queued and is now pending.",
+                }
+            ),
+            202,
+        )
 
     except requests.exceptions.HTTPError as http_err:
         try:
             error_detail = http_err.response.json()
         except ValueError:
             error_detail = str(http_err)
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
+        return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
+        return jsonify({"error": "Request to n8n API failed", "details": str(req_err)}), 500
     except Exception as e:
         current_app.logger.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
@@ -104,14 +92,31 @@ def analyze_resume():
 @require_authentication
 def get_analyze_resume():
     current_user_id = str(g.user.id)
-
     try:
-        query_response = extensions.supabase.table("analyze_resume") \
-            .select("*") \
-            .eq("user_id", current_user_id) \
-            .execute()
+        job_id_param = request.args.get("job_id")
 
-        return jsonify(query_response.data or []), 200
+        if job_id_param:
+            query_response = (
+                extensions.supabase.table("analyze_resume")
+                .select("*")
+                .eq("user_id", current_user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        else:
+            query_response = (
+                extensions.supabase.table("analyze_resume")
+                .select("*")
+                .eq("user_id", current_user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+
+        if query_response is None:
+            return jsonify(None), 200
+
+        result_data = getattr(query_response, "data", query_response)
+        return jsonify(result_data or None), 200
         
     except Exception as e:
         current_app.logger.error(f"Error fetching from analyze_resume table: {str(e)}")
