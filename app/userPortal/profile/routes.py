@@ -48,41 +48,17 @@ def upload_linkedin_pdf():
 
         # --- 2. Call the n8n webhook to extract profile data ---
         webhook_url = "https://prepzo.app.n8n.cloud/webhook/fetch_profile"
-        webhook_response = requests.post(webhook_url, json={"resume_url": public_url}, timeout=60)
-
-        if webhook_response.status_code != 200:
-            current_app.logger.error(f'n8n webhook call failed: {webhook_response.text}')
-            return jsonify({'error': 'Failed to extract profile', 'details': webhook_response.text}), 500
-
-        webhook_json = webhook_response.json()
-        output = webhook_json.get('output', webhook_json)
-
-        # --- 3. Prepare data for insertion into Supabase ---
-        profile_fields = {
-            'name': output.get('name'),
-            'title': output.get('title'),
-            'bio': output.get('bio'),
-            'location': output.get('location'),
-            'email': output.get('email'),
-            'phone': output.get('phone'),
-            'linkedin_url': output.get('linkedin_url'),
-            'website': output.get('website'),
-            'skills': output.get('skills'),
-            'certifications': output.get('certification') or output.get('certifications'),
-            'experience': output.get('experience'),
-            'projects': output.get('projects'),
-            'resume_url': public_url
-        }
-
-        profile_data = {'user_id': user_id, **profile_fields}
-
-        # --- 4. Upsert into Supabase ---
-        insert_result = supabase.table('user_profiles').upsert(profile_data, on_conflict='user_id').execute()
+        try:
+            requests.post(webhook_url, json={
+                "resume_url": public_url,
+                "user_id": user_id  # include this so n8n can return it later
+            }, timeout=2)  # short timeout to avoid blocking
+        except requests.exceptions.RequestException as req_err:
+            current_app.logger.warning(f"n8n webhook call failed (non-blocking): {req_err}")
 
         return jsonify({
-            'profile_data': profile_data,
-            'db_result': insert_result.data if hasattr(insert_result, 'data') else str(insert_result),
-            'webhook_output': output
+            "message": "Resume uploaded successfully. Profile extraction in progress.",
+            "resume_url": public_url
         }), 200
 
     except Exception as e:
@@ -116,3 +92,32 @@ def get_linkedin_profile():
     except Exception as e:
         current_app.logger.error(f'Failed to fetch profile for user {g.user.id}: {e}', exc_info=True)
         return jsonify({'error': 'Failed to fetch profile', 'details': str(e)}), 500 
+    
+@profile_bp.route('/save-linkedin-profile', methods=['POST'])
+def save_linkedin_profile():
+    data = request.json
+    user_id = data.get('user_id')
+    resume_url = data.get('resume_url')
+
+    profile_fields = {
+        'name': data.get('name'),
+        'title': data.get('title'),
+        'bio': data.get('bio'),
+        'location': data.get('location'),
+        'email': data.get('email'),
+        'phone': data.get('phone'),
+        'linkedin_url': data.get('linkedin_url'),
+        'website': data.get('website'),
+        'skills': data.get('skills'),
+        'certifications': data.get('certification') or data.get('certifications'),
+        'experience': data.get('experience'),
+        'projects': data.get('projects'),
+        'resume_url': resume_url
+    }
+
+    supabase = extensions.supabase
+    supabase.table('user_profiles').upsert(
+        {'user_id': user_id, **profile_fields}, on_conflict='user_id'
+    ).execute()
+
+    return jsonify({"message": "Profile saved"}), 200
