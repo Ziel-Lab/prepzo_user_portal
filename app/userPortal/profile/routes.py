@@ -109,6 +109,7 @@ def save_linkedin_profile():
         'linkedin_url': data.get('linkedin_url'),
         'website': data.get('website'),
         'skills': data.get('skills'),
+        'achievements': data.get('achievements'),
         'certifications': data.get('certification') or data.get('certifications'),
         'experience': data.get('experience'),
         'projects': data.get('projects'),
