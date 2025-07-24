@@ -47,7 +47,7 @@ def upload_linkedin_pdf():
         public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(storage_path)
 
         # --- 2. Call the n8n webhook to extract profile data ---
-        webhook_url = "https://prepzo.app.n8n.cloud/webhook-test/fetch_profile"
+        webhook_url = "https://prepzo.app.n8n.cloud/webhook/fetch_profile"
         try:
             requests.post(webhook_url, json={
                 "resume_url": public_url,
