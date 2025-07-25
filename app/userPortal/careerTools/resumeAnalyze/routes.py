@@ -34,7 +34,7 @@ def get_request_data():
 
 @resume_analyze_bp.route("/analyze-resume", methods=["POST","OPTIONS"])
 @require_authentication
-@check_and_use_feature('resume')
+@check_and_use_feature('resume', auto_increment=False)   # ← check only, no debit yet
 def analyze_resume():
     current_user_id = str(g.user.id)
     # Use admin client for INSERT operations (with explicit user filtering for security)
@@ -44,7 +44,7 @@ def analyze_resume():
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-    xano_api_url_resume_analyze = current_app.config.get("XANO_API_URL_RESUME_ANALYZE")
+    # We no longer call n8n from here – we only create a pending job
     
     try:
         data = get_request_data()
@@ -85,12 +85,15 @@ def analyze_resume():
         db_payload = {
             "user_id": current_user_id,
             "user_name": user_name,
-            "current_resume": current_resume_url, 
-            "company_website": company_website, 
-            "job_description": job_description, 
-            "additional_comment": additional_comment_text, 
-            "feedback_analysis": xano_data, 
-            "resume_id": resume_id_from_db 
+            "job_id": job_id,
+            "current_resume": current_resume_url,
+            "company_website": company_website,
+            "job_description": job_description,
+            "additional_comment": additional_comment_text,
+            "status": "PENDING",
+            "feedback_analysis": None,
+            "resume_id": resume_id_from_db,
+            "created_at": "now()",
         }
 
         amplitude_payload = {
@@ -121,7 +124,7 @@ def analyze_resume():
             error_detail = http_err.response.json()
         except ValueError:
             error_detail = str(http_err)
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
+        return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
         logging.error(f"Request to Xano API failed: {str(req_err)}")
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
@@ -142,7 +145,8 @@ def get_analyze_resume():
             .eq("user_id", current_user_id) \
             .execute()
 
-        return jsonify(query_response.data or []), 200
+        result_data = getattr(query_response, "data", query_response)
+        return jsonify(result_data or None), 200
         
     except Exception as e:
         logging.error(f"Error fetching from analyze_resume table: {str(e)}")

@@ -164,7 +164,7 @@ def handle_period_rollover(supabase, uid, subscription):
              current_app.logger.error(error_msg)
              raise Exception(error_msg)
 
-def check_and_use_feature(feature_name, increment_by=1):
+def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
     """
     Decorator that checks a user's feature usage against their plan limits.
     Uses the user Supabase client to ensure RLS is enforced.
@@ -206,7 +206,27 @@ def check_and_use_feature(feature_name, increment_by=1):
                 
                 # Step 4: Check if the period is expired or if no record exists.
                 today = date.today()
-                is_expired = usage_record and usage_record.get('period_end') and today > datetime.strptime(usage_record['period_end'], '%Y-%m-%d').date()
+                # Safely determine if the current usage period has expired.
+                # Handle the case where `period_end` might be NULL or in an unexpected format to avoid
+                # `TypeError: strptime() argument 1 must be str, not None` reported in production.
+                period_end_str = usage_record.get('period_end') if usage_record else None
+
+                is_expired = False
+                if usage_record:
+                    if period_end_str:
+                        try:
+                            period_end_date = datetime.strptime(period_end_str, '%Y-%m-%d').date()
+                            is_expired = today > period_end_date
+                        except (TypeError, ValueError):
+                            # Malformed date string – treat as expired to force creation of a fresh record
+                            current_app.logger.warning(
+                                f"Invalid period_end value '{period_end_str}' for user {uid}. Treating as expired.")
+                            is_expired = True
+                    else:
+                        # Missing period_end value – treat as expired so that a new record is created
+                        current_app.logger.warning(
+                            f"Missing period_end for user {uid}. Treating current usage period as expired.")
+                        is_expired = True
                 
                 if not usage_record or is_expired:
                     if is_expired:
@@ -269,25 +289,16 @@ def check_and_use_feature(feature_name, increment_by=1):
 
             # --- PRE-CHECK COMPLETE ---
             
-            # Execute the original function.
             response, status_code = f(*args, **kwargs)
 
-            # Only if the function was successful, increment the usage.
-            if 200 <= status_code < 300:
-                try:
-                    current_app.logger.info(f"Feature '{feature_name}' used successfully. Incrementing usage for user {uid[:8]}***.")
-                    
-                    # Use RPC to safely increment the value (using admin client with explicit user filter)
-                    admin_supabase.rpc('increment_feature_counters', {
-                        'p_user_id': uid,
-                        'p_period_start': usage_record['period_start'],
-                        'p_feature_base_name': feature_name,
-                        'p_increment_by': increment_by
-                    }).execute()
-
-                except APIError as e:
-                    current_app.logger.error(f"CRITICAL: Failed to increment usage for user {uid[:8]}*** via RPC: {type(e).__name__}", exc_info=True)
-                
+            # Only increment if we’re told to
+            if auto_increment and 200 <= status_code < 300:
+                supabase.rpc('increment_feature_counters', {
+                    'p_user_id': uid,
+                    'p_period_start': usage_record['period_start'],
+                    'p_feature_base_name': feature_name,
+                    'p_increment_by': increment_by
+                }).execute()
             return response, status_code
         
         return decorated_function

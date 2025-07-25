@@ -33,7 +33,7 @@ def get_request_data():
 
 @cover_letter_bp.route("/create-cover-letter", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature('cover_letter')
+@check_and_use_feature('cover_letter', auto_increment=False)
 def create_cover_letter():
     current_user_id = str(g.user.id)
     # Use admin client for INSERT operations (with explicit user filtering for security)
@@ -48,7 +48,7 @@ def create_cover_letter():
         data = get_request_data()
         current_resume_url = data.get("current_resume")
         job_description_text = data.get("job_description")
-        company_website_text = data.get("company_website")
+        company_website_text = data.get("company_website") or data.get("company_url")
         user_additional_comments_text = data.get("additional_comments")
 
         if not all([current_resume_url, job_description_text]):
@@ -84,7 +84,8 @@ def create_cover_letter():
             parsed_feedback_from_xano = {"error": "Feedback key missing in Xano response"}
 
         db_payload = {
-            "uid": current_user_id,
+            "uid": str(g.user.id),
+            "job_id": job_id,
             "job_description": job_description_text,
             "company_website": company_website_text,
             "current_resume": current_resume_url,
@@ -128,8 +129,8 @@ def create_cover_letter():
     except requests.exceptions.RequestException as req_err:
         return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
     except Exception as e:
-        print(f"Unexpected error in create_cover_letter: {str(e)}")
-        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
+        current_app.logger.error(f"Unexpected error in create_cover_letter: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred."}), 500
 
 
 @cover_letter_bp.route("/get-cover-letters", methods=["GET", "OPTIONS"])
@@ -149,6 +150,7 @@ def get_cover_letters():
     except Exception as e:
         print(f"Error fetching from cover_letter table: {str(e)}")
         return jsonify({"error": f"Could not retrieve cover letters: {str(e)}"}), 500
+
 
 
 
