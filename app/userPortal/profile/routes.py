@@ -97,11 +97,8 @@ def get_linkedin_profile():
         current_app.logger.error(f'Failed to fetch profile for user {g.user.id}: {e}', exc_info=True)
         return jsonify({'error': 'Failed to fetch profile', 'details': str(e)}), 500 
     
-@profile_bp.route('/save-linkedin-profile', methods=['POST', 'OPTIONS'])
-@require_authentication
+@profile_bp.route('/save-linkedin-profile', methods=['POST'])
 def save_linkedin_profile():
-    if request.method == 'OPTIONS':
-        return '', 204
         
     data = request.json
     user_id = data.get('user_id')
