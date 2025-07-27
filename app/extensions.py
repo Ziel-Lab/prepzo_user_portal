@@ -52,7 +52,7 @@ def init_supabase(app):
                 SUPABASE_SERVICE_KEY,
                 options=options
             )
-            logger.info("✅ Supabase ADMIN client initialized (service role)")
+            logger.info("Supabase ADMIN client initialized (service role)")
         
         # Initialize user client (anon key) for user operations with RLS
         if SUPABASE_ANON_KEY:
@@ -61,17 +61,18 @@ def init_supabase(app):
                 SUPABASE_ANON_KEY,
                 options=options
             )
-            logger.info("✅ Supabase USER client initialized (anon key + RLS)")
+            logger.info("Supabase USER client initialized (anon key + RLS)")
 
         # Set legacy reference to admin client for backward compatibility
         # TODO: Gradually migrate all admin operations to use supabase_admin explicitly
+        global supabase
         supabase = supabase_admin
 
         if not supabase_admin and not supabase_user:
             logger.error("FATAL: Neither Supabase client could be initialized.")
             return
 
-        logger.info("🔒 Dual Supabase architecture initialized successfully")
+        logger.info("Dual Supabase architecture initialized successfully")
         logger.info("   - Admin operations: service role key (bypasses RLS)")
         logger.info("   - User operations: anon key + JWT (enforces RLS)")
 
@@ -127,20 +128,32 @@ def init_livekit(app):
     
     if not LIVEKIT_AVAILABLE:
         logger.warning("LiveKit not available. Mock interview features will be disabled.")
+        livekit_client = None
         return
     
     api_key = app.config.get('LIVEKIT_API_KEY')
     api_secret = app.config.get('LIVEKIT_API_SECRET')
+    livekit_url = app.config.get('LIVEKIT_URL')
     
-    if not api_key or not api_secret:
-        logger.warning("LiveKit credentials not configured. Mock interview features will be disabled.")
+    if not all([api_key, api_secret, livekit_url]):
+        logger.warning("LiveKit credentials not fully configured. Mock interview features will be disabled.")
+        livekit_client = None
         return
     
     try:
-        # Store credentials for later use
+        # Try to import and initialize RoomService
+        from livekit.api import RoomService
+        livekit_client = RoomService(livekit_url, api_key, api_secret)
+        app.config['LIVEKIT_CONFIGURED'] = True
+        logger.info("LiveKit RoomService client initialized successfully.")
+    except ImportError:
+        # Fallback if RoomService not available
+        logger.warning("LiveKit RoomService not available. Using credential-only configuration.")
+        livekit_client = None
         app.config['LIVEKIT_CONFIGURED'] = True
         logger.info("LiveKit credentials configured successfully.")
     except Exception as e:
         logger.error(f"LiveKit initialization error: {e}", exc_info=True)
+        livekit_client = None
         
-    app.extensions["livekit"] = True
+    app.extensions["livekit"] = livekit_client or True

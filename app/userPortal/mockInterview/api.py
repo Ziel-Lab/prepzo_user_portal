@@ -19,23 +19,29 @@ except ImportError:
     VideoGrants = None
     LIVEKIT_AVAILABLE = False
 
-# Import RoomService-related functions lazily to avoid import errors
-def get_room_service_client():
-    """Get RoomServiceClient class dynamically to avoid import errors"""
+logger = logging.getLogger(__name__)
+
+def get_livekit_api():
+    """Get initialized LiveKit API client"""
     if not LIVEKIT_AVAILABLE:
         return None
-    try:
-        # Try different possible names for the room service
-        if hasattr(api, 'RoomServiceClient'):
-            return api.RoomServiceClient
-        elif hasattr(api, 'RoomService'):
-            return api.RoomService
-        else:
-            return None
-    except Exception:
+    
+    livekit_api_key = current_app.config.get('LIVEKIT_API_KEY')
+    livekit_api_secret = current_app.config.get('LIVEKIT_API_SECRET')
+    livekit_url = current_app.config.get('LIVEKIT_URL')
+    
+    if not all([livekit_api_key, livekit_api_secret, livekit_url]):
         return None
-
-logger = logging.getLogger(__name__)
+    
+    try:
+        return api.LiveKitAPI(
+            url=livekit_url,
+            api_key=livekit_api_key,
+            api_secret=livekit_api_secret
+        )
+    except Exception as e:
+        logger.error(f"Failed to create LiveKit API client: {e}")
+        return None
 
 async def create_interview_room(room_name):
     """Create a new LiveKit room for interview"""
@@ -52,38 +58,23 @@ async def create_interview_room(room_name):
             logger.error("Missing LiveKit configuration")
             return None
         
-        # Create room using lazy loading
-        RoomServiceClient = get_room_service_client()
-        if not RoomServiceClient:
-            logger.error("RoomServiceClient not available")
+        # Get LiveKit API client
+        lkapi = get_livekit_api()
+        if not lkapi:
+            logger.error("LiveKit API client not available")
             return None
-            
-        room_service = RoomServiceClient(
-            livekit_url,
-            livekit_api_key,
-            livekit_api_secret,
+        
+        # Create room using current API
+        room_options = api.CreateRoomRequest(
+            name=room_name,
+            empty_timeout=10 * 60,  # 10 minutes
+            max_participants=2,  # User + AI agent
+            metadata=""
         )
         
-        # Use proper request object or dict based on API
-        try:
-            from livekit.api import CreateRoomRequest
-            room_options = CreateRoomRequest(
-                name=room_name,
-                empty_timeout=10 * 60,  # 10 minutes
-                max_participants=2,  # User + AI agent
-                metadata=""
-            )
-        except ImportError:
-            # Fallback to dict if request objects not available
-            room_options = {
-                'name': room_name,
-                'empty_timeout': 10 * 60,
-                'max_participants': 2,
-                'metadata': ""
-            }
-        
-        room = await room_service.create_room(room_options)
+        room = await lkapi.room.create_room(room_options)
         logger.info(f"Created LiveKit room: {room_name}")
+        await lkapi.aclose()
         return room
         
     except Exception as e:
@@ -139,26 +130,15 @@ async def delete_room(room_name):
             logger.error("Missing LiveKit configuration")
             return False
         
-        RoomServiceClient = get_room_service_client()
-        if not RoomServiceClient:
-            logger.error("RoomServiceClient not available")
+        lkapi = get_livekit_api()
+        if not lkapi:
+            logger.error("LiveKit API client not available")
             return False
-            
-        room_service = RoomServiceClient(
-            livekit_url,
-            livekit_api_key,
-            livekit_api_secret,
-        )
         
-        # Use proper request object or dict based on API
-        try:
-            from livekit.api import DeleteRoomRequest
-            delete_request = DeleteRoomRequest(room=room_name)
-        except ImportError:
-            delete_request = {'room': room_name}
-            
-        await room_service.delete_room(delete_request)
+        delete_request = api.DeleteRoomRequest(room=room_name)
+        await lkapi.room.delete_room(delete_request)
         logger.info(f"Deleted LiveKit room: {room_name}")
+        await lkapi.aclose()
         return True
         
     except Exception as e:
@@ -180,25 +160,14 @@ async def get_room_participants(room_name):
             logger.error("Missing LiveKit configuration")
             return []
         
-        RoomServiceClient = get_room_service_client()
-        if not RoomServiceClient:
-            logger.error("RoomServiceClient not available")
+        lkapi = get_livekit_api()
+        if not lkapi:
+            logger.error("LiveKit API client not available")
             return []
-            
-        room_service = RoomServiceClient(
-            livekit_url,
-            livekit_api_key,
-            livekit_api_secret,
-        )
         
-        # Use proper request object or dict based on API
-        try:
-            from livekit.api import ListParticipantsRequest
-            list_request = ListParticipantsRequest(room=room_name)
-        except ImportError:
-            list_request = {'room': room_name}
-            
-        participants = await room_service.list_participants(list_request)
+        list_request = api.ListParticipantsRequest(room=room_name)
+        participants = await lkapi.room.list_participants(list_request)
+        await lkapi.aclose()
         
         return participants.participants
         

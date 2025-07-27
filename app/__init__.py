@@ -18,7 +18,6 @@ from .userPortal.applications.jobListing import job_listing_bp
 from .userPortal.profile import profile_bp
 
 def create_app():
-    load_dotenv()
     app = Flask(__name__)
 
     secret_name = "userPortal-dev"

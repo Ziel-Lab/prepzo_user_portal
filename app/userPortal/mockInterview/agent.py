@@ -1,41 +1,28 @@
 """
-LiveKit Agent with OpenAI Realtime integration for mock interviews
+LiveKit Agent with OpenAI Realtime API for Mock Interviews
+Following official LiveKit documentation for production configuration
 """
 
 import os
 import asyncio
 import logging
-import aiohttp
 import json
+import time
 from typing import Dict, Any, Optional
+from dataclasses import dataclass
 
-# Handle imports for both standalone and Flask app usage
-try:
-    from flask import current_app
-    FLASK_AVAILABLE = True
-except ImportError:
-    FLASK_AVAILABLE = False
-    current_app = None
+from livekit import agents
+from livekit.agents import (
+    Agent, 
+    AgentSession, 
+    JobContext, 
+    function_tool, 
+    RunContext, 
+    llm
+)
+from livekit.plugins.openai import realtime
 
-# Handle relative imports
-try:
-    from .prompt import get_interview_prompt, get_closing_prompt, get_enhanced_interview_prompt
-    from .function import INTERVIEW_TOOLS, get_user_interview_context
-except ImportError:
-    try:
-        from prompt import get_interview_prompt, get_closing_prompt, get_enhanced_interview_prompt
-        from function import INTERVIEW_TOOLS, get_user_interview_context
-    except ImportError:
-        # Define minimal fallbacks if modules not available
-        def get_interview_prompt(*args, **kwargs):
-            return "You are a professional interviewer conducting a mock interview."
-        def get_closing_prompt():
-            return "Thank you for the interview. Please provide closing feedback."
-        def get_enhanced_interview_prompt(context):
-            return f"You are interviewing for {context.get('position', 'a position')}. Conduct a professional interview."
-        INTERVIEW_TOOLS = []
-        async def get_user_interview_context(user_id, session_id=None):
-            return {"user_id": user_id, "session_id": session_id}
+# Removed TranscriptionHandler import - using direct live transcription instead
 
 # Configure logging for production
 logging.basicConfig(
@@ -45,504 +32,907 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# LiveKit agents imports
-try:
-    from livekit import agents
-    from livekit.agents import AgentSession, Agent, RoomInputOptions
-    from livekit.plugins import openai, noise_cancellation
-    from dotenv import load_dotenv
-    LIVEKIT_AGENTS_AVAILABLE = True
-    logger.info("LiveKit agents imported successfully")
-except ImportError as e:
-    LIVEKIT_AGENTS_AVAILABLE = False
-    logger.error(f"Failed to import LiveKit agents: {e}")
 
-# Load environment variables if running standalone
-load_dotenv()
+@dataclass
+class InterviewContext:
+    """Interview session context data"""
+    session_id: str  # mock_interview.id
+    attempt_id: str  # mock_interview_attempts.id
+    attempt_number: int  # 1, 2, or 3
+    user_id: str
+    user_display_name: str
+    resume_text: str
+    job_description: str
+    company_name: str
+    position: str
+    interview_type: str  # 'technical', 'behavioral', 'system_design', etc.
+    difficulty_level: str  # 'entry', 'mid', 'senior'
+    custom_instructions: str = ""
+    company_details: str = ""
+    linkedin_profile: str = ""
+    agent_prompt: str = ""  # Pre-prepared agent instructions
+    status_prep: str = "PENDING"  # PENDING, DONE
+    room_name: str = ""
+    title: str = ""
+    attempt_status: str = "pending"  # pending, active, completed, cancelled
 
-# Define the session state class
-class InterviewSessionState:
-    """State management for interview session"""
+class MockInterviewAgent(Agent):
+    """Production-level mock interview agent using OpenAI Realtime API"""
     
-    def __init__(self, interview_config=None):
-        self.interview_config = interview_config or {}
-        self.interview_started = False
-        self.interview_duration = self.interview_config.get('duration_minutes', 30) * 60  # Convert to seconds
+    def __init__(self, interview_context: InterviewContext) -> None:
+        self.interview_context = interview_context
+        
+        # Get instructions from agent_prompt column only (will raise ValueError if missing)
+        instructions = self._build_interview_instructions()
+        
+        # Store configuration for AgentSession (avoid overriding read-only properties)
+        self._interview_instructions = instructions
+        self.voice = "alloy"  # OpenAI voice option
+        self.temperature = 0.7
+        
+        # Initialize Agent with instructions from database only
+        super().__init__(instructions=instructions)
+        
+        # Interview state tracking
+        self.questions_asked = []
+        self.current_stage = "introduction"  # introduction -> main_questions -> wrap_up -> feedback -> ending
         self.start_time = None
-        self.transcript = []
-        self.feedback_notes = []
-        self.instructions = ""
-
-    def start_interview(self):
-        """Start the interview session"""
-        if not self.interview_started:
-            self.interview_started = True
-            self.start_time = asyncio.get_event_loop().time()
-            logger.info(f"Interview started for session: {self.interview_config.get('session_id', 'unknown')}")
-
-    def add_to_transcript(self, speaker: str, message: str, message_type: str = 'text'):
-        """Add message to interview transcript"""
-        if not self.start_time:
-            return
+        self.max_duration_minutes = 45  # Maximum interview duration
+        self.target_duration_minutes = 30  # Target interview duration
+        
+        # No longer use TranscriptionHandler - causes table mismatch errors
+        # Live transcription will be handled directly
+        
+        # Schedule time-based checks
+        self._schedule_time_checks()
+    
+    def _build_interview_instructions(self) -> str:
+        """Get interview instructions from agent_prompt column only"""
+        
+        # ONLY use agent_prompt from database - no dynamic instruction building
+        if hasattr(self.interview_context, 'agent_prompt') and self.interview_context.agent_prompt and self.interview_context.agent_prompt.strip():
+            logger.info(f"Using agent_prompt from database for session {self.interview_context.session_id}")
             
-        self.transcript.append({
-            'speaker': speaker,
-            'message': message,
-            'timestamp': asyncio.get_event_loop().time() - self.start_time,
-            'type': message_type
-        })
-
-    def should_end_interview(self):
-        """Check if interview should end based on time"""
-        if not self.start_time:
-            return False
+            # Add essential ending instructions to existing prompt if not already present
+            ending_instructions = """
+            
+            INTERVIEW ENDING GUIDELINES:
+            - Aim for 20-30 minute interviews unless candidate needs more time
+            - End when you've gathered sufficient information about the candidate's abilities
+            - Use the end_interview function when: you've asked enough questions, reached natural conclusion, or time limit approached
+            - Provide constructive summary when ending
+            - Common ending reasons: "questions_complete", "time_complete", "natural_conclusion"
+            """
+            
+            # Only add ending instructions if not already present
+            agent_prompt = self.interview_context.agent_prompt.strip()
+            if "end_interview" not in agent_prompt.lower():
+                agent_prompt += ending_instructions
+            
+            return agent_prompt
         
-        elapsed_time = asyncio.get_event_loop().time() - self.start_time
-        return elapsed_time >= self.interview_duration
-
-    async def end_interview(self):
-        """End the interview and provide closing feedback"""
-        # Generate feedback
-        feedback = await self.generate_feedback()
+        # If no agent_prompt, refuse to start the interview
+        error_msg = f"No agent_prompt found for session {self.interview_context.session_id}. Interview cannot start without proper agent instructions."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    def _schedule_time_checks(self):
+        """Schedule periodic time checks for interview duration management"""
+        async def time_check_task():
+            try:
+                # Wait for interview to actually start
+                while not self.start_time:
+                    await asyncio.sleep(5)
+                
+                # Check every 5 minutes
+                while self.current_stage not in ["ending", "completed"]:
+                    await asyncio.sleep(300)  # 5 minutes
+                    
+                    if not self.start_time:
+                        continue
+                        
+                    elapsed_minutes = (asyncio.get_event_loop().time() - self.start_time) / 60
+                    
+                    # Target duration warning (25 minutes)
+                    if elapsed_minutes >= 25 and self.current_stage not in ["wrap_up", "ending"]:
+                        await self.session.generate_reply(
+                            instructions="Gently let the candidate know we're approaching the end of our time and start wrapping up with final questions."
+                        )
+                        self.current_stage = "wrap_up"
+                        logger.info("Interview moved to wrap-up stage due to time")
+                    
+                    # Hard time limit (45 minutes)
+                    elif elapsed_minutes >= self.max_duration_minutes:
+                        await self.end_interview(
+                            context=None,
+                            reason="time_limit_reached",
+                            summary="We've reached our maximum interview time. Thank you for your responses today."
+                        )
+                        break
+                        
+            except Exception as e:
+                logger.error(f"Error in time check task: {e}")
         
-        # Calculate interview duration
-        duration = asyncio.get_event_loop().time() - (self.start_time or 0)
+        # Start the time check task
+        asyncio.create_task(time_check_task())
+    
+    
+    async def on_enter(self) -> None:
+        """Called when agent enters the session"""
+        self.start_time = asyncio.get_event_loop().time()
+        logger.info(f"Mock interview agent entered session {self.interview_context.session_id} (Attempt {self.interview_context.attempt_number})")
         
-        # Store results
-        self.interview_results = {
-            'transcript': self.transcript,
-            'feedback': feedback,
-            'duration': duration,
-            'interview_config': self.interview_config
-        }
+        # Mark attempt as active
+        asyncio.create_task(self.update_attempt_status('active'))
         
-        # Send webhook with interview completion data
-        await self.send_completion_webhook()
-
-    async def generate_feedback(self):
-        """Generate AI feedback based on the interview"""
-        feedback = {
-            'overall_score': 'Good',
-            'strengths': [
-                'Clear communication',
-                'Relevant examples',
-                'Professional demeanor'
-            ],
-            'areas_for_improvement': [
-                'Provide more specific details',
-                'Use more quantifiable metrics'
-            ],
-            'specific_notes': 'The candidate demonstrated good communication skills and provided relevant examples.',
-            'recommendations': [
-                'Practice with more technical questions',
-                'Prepare more STAR method examples'
-            ]
-        }
+        # Debug: Log available methods on this agent
+        agent_methods = [method for method in dir(self) if callable(getattr(self, method)) and not method.startswith('_')]
+        logger.info(f"Available agent methods: {agent_methods}")
         
-        return feedback
+        # Save system message for interview start
+        # asyncio.create_task(self.transcription_handler.save_system_message(
+        #     f"Interview attempt {self.interview_context.attempt_number} started for {self.interview_context.position} position at {self.interview_context.company_name}",
+        #     metadata={
+        #         "event": "interview_start",
+        #         "interview_type": self.interview_context.interview_type,
+        #         "position": self.interview_context.position,
+        #         "company": self.interview_context.company_name,
+        #         "attempt_number": self.interview_context.attempt_number
+        #     }
+        # ))
+        
+        # Generate initial greeting based on agent_prompt instructions only
+        greeting_instructions = "Begin the interview with an appropriate greeting and introduction as specified in your instructions. Start the interview professionally."
+        
+        await self.session.generate_reply(instructions=greeting_instructions)
+        
+        # Save the greeting as an interviewer message and update live transcription
+        greeting_text = f"Interview attempt {self.interview_context.attempt_number} started"
+        # asyncio.create_task(self.transcription_handler.save_interviewer_message(
+        #     greeting_text,
+        #     message_type="greeting",
+        #     metadata={"stage": "introduction", "attempt_number": self.interview_context.attempt_number}
+        # ))
+        
+        # Update live transcription with greeting
+        # asyncio.create_task(self.transcription_handler.update_live_transcription(
+        #     "interviewer", 
+        #     "AI Interviewer", 
+        #     greeting_text, 
+        #     "introduction"
+        # ))
+        
+        logger.info(f"Started interview attempt {self.interview_context.attempt_number} for session {self.interview_context.session_id}")
+        logger.info(f"Live transcription initialized for attempt: {self.interview_context.attempt_id}")
+    
+    async def on_exit(self) -> None:
+        """Called when agent exits the session"""
+        if self.start_time and self.current_stage != "ending":
+            # Only mark as completed if not already handled by end_interview
+            duration = asyncio.get_event_loop().time() - self.start_time
+            duration_minutes = duration / 60
+            logger.info(f"Mock interview attempt {self.interview_context.attempt_number} completed. Duration: {duration:.1f} seconds")
+            
+            # Mark attempt as completed and save duration
+            asyncio.create_task(self.update_attempt_completion(duration_minutes))
+            
+            # Save system message for interview end (non-blocking)
+            # asyncio.create_task(self.transcription_handler.save_system_message(
+            #     f"Interview attempt {self.interview_context.attempt_number} completed. Duration: {duration:.1f} seconds",
+            #     metadata={
+            #         "event": "interview_end",
+            #         "duration_seconds": duration,
+            #         "duration_minutes": duration_minutes,
+            #         "questions_asked": len(self.questions_asked),
+            #         "final_stage": self.current_stage,
+            #         "attempt_number": self.interview_context.attempt_number,
+            #         "ended_by": "system"
+            #     }
+            # ))
+        elif self.current_stage == "ending":
+            logger.info(f"Interview was ended by agent, skipping duplicate completion marking")
+        else:
+            logger.info("Interview exit without proper start time")
 
-    def get_interview_results(self):
-        """Get the interview results"""
-        return getattr(self, 'interview_results', None)
-
-    async def send_completion_webhook(self):
-        """Send interview completion data to webhook endpoint"""
+    async def update_attempt_status(self, status: str):
+        """Update the status of the current attempt"""
         try:
-            # Get session ID from interview config
-            session_id = self.interview_config.get('session_id')
-            if not session_id:
-                logger.warning("No session_id found in interview config for webhook")
-                return
+            from ...extensions import get_admin_client
+            admin_client = get_admin_client()
             
-            # Prepare webhook payload
-            webhook_data = {
-                'session_id': session_id,
-                'room_name': self.interview_config.get('room_name'),
-                'transcript': self.format_transcript_for_webhook(),
-                'duration': self.interview_results.get('duration', 0),
-                'participant_data': {
-                    'total_messages': len(self.transcript),
-                    'feedback_notes': self.feedback_notes,
-                    'interview_type': self.interview_config.get('interview_type'),
-                    'position': self.interview_config.get('position')
-                }
+            update_data = {
+                'status': status,
+                'started_at': 'now()' if status == 'active' else None
             }
             
-            # Get webhook URL from Flask config or environment
-            if FLASK_AVAILABLE and current_app:
-                webhook_url = current_app.config.get('INTERVIEW_WEBHOOK_URL')
+            result = admin_client.table('mock_interview_attempts')\
+                .update(update_data)\
+                .eq('id', self.interview_context.attempt_id)\
+                .execute()
+            
+            if result.data:
+                logger.info(f"Updated attempt {self.interview_context.attempt_id} status to {status}")
             else:
-                webhook_url = os.getenv('INTERVIEW_WEBHOOK_URL')
+                logger.warning(f"Failed to update attempt status for {self.interview_context.attempt_id}")
                 
-            if not webhook_url:
-                # Fallback to local development URL
-                webhook_url = 'http://localhost:5000/userPortal/mockInterview/webhook/interview-completed'
-            
-            # Send webhook
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    webhook_url,
-                    json=webhook_data,
-                    headers={'Content-Type': 'application/json'},
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as response:
-                    if response.status == 200:
-                        logger.info(f"Successfully sent completion webhook for session {session_id}")
-                    else:
-                        logger.error(f"Webhook failed with status {response.status}: {await response.text()}")
-                        
         except Exception as e:
-            logger.error(f"Error sending completion webhook: {str(e)}")
+            logger.error(f"Error updating attempt status: {e}")
 
-    def format_transcript_for_webhook(self):
-        """Format transcript for webhook transmission"""
+    async def update_attempt_completion(self, duration_minutes: float):
+        """Mark attempt as completed and save duration"""
         try:
-            formatted_transcript = []
+            from ...extensions import get_admin_client
+            admin_client = get_admin_client()
             
-            for entry in self.transcript:
-                formatted_entry = {
-                    'speaker': entry.get('speaker', 'unknown'),
-                    'message': entry.get('message', ''),
-                    'timestamp': entry.get('timestamp', 0),
-                    'type': entry.get('type', 'message')
-                }
-                formatted_transcript.append(formatted_entry)
+            update_data = {
+                'status': 'completed',
+                'completed_at': 'now()',
+                'actual_duration_minutes': int(duration_minutes)
+            }
             
-            # Convert to readable text format for analysis
-            text_transcript = "\n\n".join([
-                f"[{entry['timestamp']:.1f}s] {entry['speaker']}: {entry['message']}"
-                for entry in formatted_transcript
-                if entry['message'].strip()
-            ])
+            result = admin_client.table('mock_interview_attempts')\
+                .update(update_data)\
+                .eq('id', self.interview_context.attempt_id)\
+                .execute()
             
-            return text_transcript
-            
-        except Exception as e:
-            logger.error(f"Error formatting transcript: {str(e)}")
-            return "Error formatting transcript"
-
-# Global interview state (in production, this would be stored in a database)
-interview_sessions = {}
-
-class InterviewAssistant(Agent):
-    """Custom agent for mock interviews"""
-    
-    def __init__(self, session_state: InterviewSessionState):
-        # Get enhanced interview prompt with full context
-        interview_config = session_state.interview_config
-        interview_context = interview_config.get('interview_context', {})
-        
-        if interview_context and any([
-            interview_context.get('resume_text'),
-            interview_context.get('job_description')
-        ]):
-            instructions = get_enhanced_interview_prompt(interview_context)
-        else:
-            # Fallback to basic prompt if no enhanced context provided
-            instructions = get_interview_prompt(
-                interview_type=interview_config.get('interview_type', 'behavioral'),
-                difficulty_level=interview_config.get('difficulty_level', 'medium'),
-                position=interview_config.get('position', 'Software Engineer'),
-                custom_instructions=interview_config.get('custom_instructions', '')
-            )
-        
-        # Add greeting instruction to the beginning
-        greeting_instruction = (
-            "Start the interview by greeting the participant warmly and asking them to introduce themselves. "
-            "Keep your initial greeting brief and natural. "
-        )
-        
-        # Add context information if resume/job description available
-        if interview_context.get('has_resume') or interview_context.get('has_job_description'):
-            context_instruction = "\n\nCONTEXT INFORMATION:\n"
-            if interview_context.get('has_resume'):
-                context_instruction += f"- Resume available: {interview_context.get('resume_text', 'Content not loaded')[:200]}...\n"
-            if interview_context.get('has_job_description'):
-                context_instruction += f"- Job description available: {interview_context.get('job_description', 'Content not loaded')[:200]}...\n"
-            context_instruction += "\nUse this information to ask relevant, personalized questions.\n\n"
-            instructions = context_instruction + instructions
-        
-        instructions = greeting_instruction + instructions
-        
-        # Initialize agent with tools for resume/job description access
-        super().__init__(
-            instructions=instructions,
-            tools=INTERVIEW_TOOLS if LIVEKIT_AGENTS_AVAILABLE else []
-        )
-        self.session_state = session_state
-
-async def entrypoint(ctx: agents.JobContext):
-    """Main entrypoint for the interview agent"""
-    if not LIVEKIT_AGENTS_AVAILABLE:
-        logger.error("LiveKit agents not available")
-        return
-        
-    logger.info(f"Starting interview session in room: {ctx.room.name}")
-    
-    # Check OpenAI API key
-    openai_key = os.getenv('OPENAI_API_KEY')
-    if openai_key:
-        logger.info(f"OpenAI API key found (length: {len(openai_key)})")
-    else:
-        logger.error("OpenAI API key not found!")
-        return
-    
-    # Get interview configuration
-    interview_config = await get_interview_config(ctx.room.name)
-    
-    # Load user's resume and job description context if user_id is available
-    user_id = interview_config.get('user_id')
-    session_id = interview_config.get('session_id')
-    
-    if user_id:
-        logger.info(f"Loading interview context for user: {user_id}")
-        try:
-            # Load user's documents (resume, job description)
-            user_context = await get_user_interview_context(user_id, session_id)
-            
-            if 'error' not in user_context:
-                # Merge user context into interview config
-                interview_config['interview_context'] = user_context
-                logger.info(f"Loaded context - Resume: {user_context.get('has_resume', False)}, "
-                          f"Job Description: {user_context.get('has_job_description', False)}")
+            if result.data:
+                logger.info(f"Marked attempt {self.interview_context.attempt_id} as completed")
             else:
-                logger.warning(f"Failed to load user context: {user_context.get('error')}")
-                interview_config['interview_context'] = {}
+                logger.warning(f"Failed to mark attempt as completed for {self.interview_context.attempt_id}")
+                
         except Exception as e:
-            logger.error(f"Error loading user interview context: {e}")
-            interview_config['interview_context'] = {}
-    else:
-        logger.info("No user_id provided, proceeding with general interview")
-        interview_config['interview_context'] = {}
+            logger.error(f"Error marking attempt as completed: {e}")
     
-    # Initialize interview session state
-    session_state = InterviewSessionState(interview_config)
-    interview_sessions[ctx.room.name] = session_state
-    
-    # Create interview assistant
-    assistant = InterviewAssistant(session_state)
-    
-    # Create agent session with OpenAI Realtime model
-    logger.info("Creating AgentSession with RealtimeModel")
-    try:
-        session = AgentSession(
-            llm=openai.realtime.RealtimeModel(
-                voice="coral"  # You can change to "alloy", "sage", "shimmer", etc.
-            )
-        )
-        logger.info("AgentSession created successfully")
-    except Exception as e:
-        logger.error(f"Error creating AgentSession: {e}")
-        raise
-    
-    # Set up basic transcript tracking (optional - RealtimeModel handles most of this)
-    @session.on("agent_speech_committed")
-    def on_agent_speech(msg):
-        session_state.add_to_transcript("agent", msg.content)
-        logger.info(f"Agent said: {msg.content}")
-    
-    @session.on("user_speech_committed") 
-    def on_user_speech(msg):
-        session_state.add_to_transcript("user", msg.content)
-        logger.info(f"User said: {msg.content}")
-    
-    # Start the session
-    logger.info("Starting AgentSession")
-    try:
-        await session.start(
-            room=ctx.room,
-            agent=assistant,
-            room_input_options=RoomInputOptions(
-                # Production: Enable LiveKit Cloud enhanced noise cancellation
-                # - For production, always use LiveKit Cloud features
-                # - For telephony applications, use `BVCTelephony` for best results
-                noise_cancellation=noise_cancellation.BVC(),
-            ),
-        )
-        logger.info("AgentSession started successfully")
-    except Exception as e:
-        logger.error(f"Error starting AgentSession: {e}")
-        raise
-    
-    # Connect to the room
-    logger.info("Connecting to room")
-    try:
-        await ctx.connect()
-        logger.info("Connected to room successfully")
-    except Exception as e:
-        logger.error(f"Error connecting to room: {e}")
-        raise
-    
-    # Start the interview
-    session_state.start_interview()
-    
-    # Simple greeting after connection
-    logger.info("Sending initial greeting")
-    try:
-        await asyncio.sleep(2)  # Wait for connection to stabilize
+    @function_tool()
+    async def move_to_next_stage(self, context: RunContext, stage: str):
+        """Move interview to next stage
         
-        greeting_instructions = (
-            "Greet the participant warmly and ask them to introduce themselves. "
-            "Say something like: 'Welcome to your mock interview! I'm your AI interviewer. "
-            "Please introduce yourself and tell me about your background.'"
-        )
+        Args:
+            stage: The stage to move to (introduction, main_questions, wrap_up, feedback)
+        """
+        previous_stage = self.current_stage
+        valid_stages = ["introduction", "main_questions", "wrap_up", "feedback"]
         
-        await session.generate_reply(instructions=greeting_instructions)
-        logger.info("Initial greeting sent successfully")
-    except Exception as e:
-        logger.error(f"Error sending greeting: {e}")
+        if stage not in valid_stages:
+            return f"Invalid stage. Valid stages are: {', '.join(valid_stages)}"
+        
+        self.current_stage = stage
+        
+        # Save stage transition to transcription
+        # await self.save_stage_transition(previous_stage, stage)
+        
+        logger.info(f"Interview moved from {previous_stage} to {stage} stage")
+        return f"Interview stage changed to: {stage}"
     
-    # Monitor for interview completion
-    asyncio.create_task(monitor_interview_completion(session, session_state))
+    @function_tool()
+    async def record_question_asked(self, context: RunContext, question: str, category: str):
+        """Record a question that was asked
+        
+        Args:
+            question: The question that was asked
+            category: The category of the question (technical, behavioral, etc.)
+        """
+        question_data = {
+            'question': question,
+            'category': category,
+            'timestamp': asyncio.get_event_loop().time() - (self.start_time or 0)
+        }
+        
+        self.questions_asked.append(question_data)
+        logger.info(f"Question recorded: {category} - {question[:50]}...")
+        
+        # Save question to transcription database
+        # await self.transcription_handler.save_interviewer_message(
+        #     question,
+        #     message_type="question",
+        #     metadata={
+        #         "category": category,
+        #         "question_number": len(self.questions_asked),
+        #         "stage": self.current_stage,
+        #         "interview_time": question_data['timestamp']
+        #     }
+        # )
+        
+        return f"Question recorded in {category} category"
     
-    logger.info("Interview session initialized successfully")
+    @function_tool()
+    async def get_interview_progress(self, context: RunContext):
+        """Get current interview progress and statistics
+        
+        Returns:
+            Dictionary with progress information
+        """
+        progress = {
+            'current_stage': self.current_stage,
+            'questions_asked': len(self.questions_asked),
+            'interview_duration': (asyncio.get_event_loop().time() - (self.start_time or 0)) if self.start_time else 0,
+            'questions_by_category': {}
+        }
+        
+        # Count questions by category
+        for q in self.questions_asked:
+            category = q.get('category', 'general')
+            progress['questions_by_category'][category] = progress['questions_by_category'].get(category, 0) + 1
+        
+        return json.dumps(progress)
+
+    @function_tool()
+    async def end_interview(self, context: RunContext, reason: str, summary: str):
+        """End the interview session
+        
+        Args:
+            reason: Why the interview is ending (e.g., "time_complete", "questions_complete", "natural_conclusion")
+            summary: Brief summary of the interview performance
+        """
+        try:
+            logger.info(f"Agent initiated interview end - Reason: {reason}")
+            
+            # Mark interview as ending
+            self.current_stage = "ending"
+            
+            # Calculate duration
+            duration = asyncio.get_event_loop().time() - (self.start_time or 0)
+            duration_minutes = duration / 60
+            
+            # Generate ending message using provided summary only
+            ending_message = f"""Thank you for completing this interview. 
+            
+            {summary}
+            
+            I'll now end our session. Your responses have been recorded and you'll receive detailed feedback shortly."""
+            
+            # Send ending message to user
+            await self.session.generate_reply(instructions=f"Say this ending message to the candidate: {ending_message}")
+            
+            # Send structured notification to frontend via text stream
+            try:
+                if hasattr(self.session, 'room') and hasattr(self.session.room, 'localParticipant'):
+                    end_notification = {
+                        "type": "interview_end",
+                        "reason": reason,
+                        "summary": summary,
+                        "attempt_number": self.interview_context.attempt_number,
+                        "session_id": self.interview_context.session_id,
+                        "attempt_id": self.interview_context.attempt_id,
+                        "duration_minutes": duration_minutes,
+                        "next_steps": "feedback_ready" if self.interview_context.attempt_number == 3 else "attempt_available"
+                    }
+                    
+                    # Send via text stream
+                    await self.session.room.local_participant.send_text(
+                        json.dumps(end_notification),
+                        topic="interview_control"
+                    )
+                    logger.info("Sent interview end notification to frontend")
+                    
+            except Exception as e:
+                logger.error(f"Error sending text stream notification: {e}")
+            
+            # Save ending system message
+            # asyncio.create_task(self.transcription_handler.save_system_message(
+            #     f"Interview ended by agent. Reason: {reason}. Summary: {summary}",
+            #     metadata={
+            #         "event": "interview_end_by_agent",
+            #         "reason": reason,
+            #         "summary": summary,
+            #         "duration_seconds": duration,
+            #         "duration_minutes": duration_minutes,
+            #         "attempt_number": self.interview_context.attempt_number
+            #     }
+            # ))
+            
+            # Wait a moment for messages to be sent
+            await asyncio.sleep(3)
+            
+            # Mark attempt as completed
+            await self.update_attempt_completion(duration_minutes)
+            
+            # Disconnect from room (this will trigger on_exit)
+            if hasattr(self.session, 'room'):
+                await self.session.room.disconnect()
+                
+            return f"Interview ended successfully. Reason: {reason}"
+            
+        except Exception as e:
+            logger.error(f"Error ending interview: {str(e)}")
+            return f"Error ending interview: {str(e)}"
 
 
+    
+    async def save_stage_transition(self, from_stage: str, to_stage: str):
+        """Save stage transition as system message"""
+        try:
+            # asyncio.create_task(self.transcription_handler.save_system_message(
+            #     f"Interview stage changed from '{from_stage}' to '{to_stage}'",
+            #     metadata={
+            #         "event": "stage_transition",
+            #         "from_stage": from_stage,
+            #         "to_stage": to_stage,
+            #         "timestamp": asyncio.get_event_loop().time() - (self.start_time or 0)
+            #     }
+            # ))
+            pass # No longer using TranscriptionHandler for stage transitions
+        except Exception as e:
+            logger.error(f"Error saving stage transition: {str(e)}")
 
-async def handle_interview_end(session: AgentSession, session_state: InterviewSessionState):
-    """Handle the end of an interview"""
-    try:
-        await session_state.end_interview()
-        
-        # Generate closing message
-        closing_message = get_closing_prompt()
-        await session.generate_reply(
-            instructions=f"End the interview with this closing message: {closing_message}"
-        )
-        
-        logger.info("Interview ended successfully")
-        
-    except Exception as e:
-        logger.error(f"Error handling interview end: {str(e)}")
 
-async def monitor_interview_completion(session: AgentSession, session_state: InterviewSessionState):
-    """Monitor interview for completion based on time"""
+# Removed duplicate transcription handlers - session.py handles this correctly
+
+
+async def save_live_transcription(attempt_id: str, speaker_type: str, speaker_name: str, content: str):
+    """Save message directly to live transcription in mock_interview_attempts table"""
     try:
-        # Wait for interview duration
-        await asyncio.sleep(session_state.interview_duration)
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
         
-        # Check if interview should end
-        if session_state.should_end_interview():
-            logger.info(f"Interview time limit reached for session")
-            await handle_interview_end(session, session_state)
+        # Get current live transcription
+        response = admin_client.table('mock_interview_attempts')\
+            .select('live_transcription')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not response.data:
+            logger.warning(f"No attempt found with id {attempt_id}")
+            return
+            
+        current_transcription = response.data[0].get('live_transcription') or {"conversation": []}
+        
+        # Add new conversation entry
+        from datetime import datetime
+        conversation_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "speaker_type": speaker_type,
+            "speaker_name": speaker_name,
+            "message": content,
+            "sequence": len(current_transcription.get("conversation", [])) + 1
+        }
+        
+        current_transcription["conversation"].append(conversation_entry)
+        
+        # Update the attempt with new live transcription
+        update_response = admin_client.table('mock_interview_attempts')\
+            .update({'live_transcription': current_transcription})\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if update_response.data:
+            logger.info(f"Saved live transcription for attempt {attempt_id}: {speaker_type} - {content[:50]}...")
+        else:
+            logger.warning(f"Failed to update live transcription for attempt {attempt_id}")
             
     except Exception as e:
-        logger.error(f"Error monitoring interview completion: {str(e)}")
+        logger.error(f"Error saving live transcription: {e}")
 
-async def get_interview_config(room_name: str) -> Dict[str, Any]:
-    """Get interview configuration for the room"""
-    # Check if we have a pre-stored configuration
-    if room_name in interview_sessions:
-        stored_config = interview_sessions[room_name].interview_config
-        logger.info(f"Found stored config for room {room_name}")
-        return stored_config
-    
-    # Try to extract user_id from room_name if it follows a pattern like "interview_userid_sessionid"
-    user_id = None
-    session_id = room_name
-    
-    if room_name.startswith('interview_'):
-        parts = room_name.split('_')
-        if len(parts) >= 3:
-            user_id = parts[1]
-            session_id = '_'.join(parts[2:])
-            logger.info(f"Extracted user_id: {user_id}, session_id: {session_id} from room_name: {room_name}")
-    
-    # Return configuration with extracted user_id
-    config = {
-        'session_id': session_id,
-        'room_name': room_name,
-        'user_id': user_id,
-        'interview_type': 'behavioral',
-        'difficulty_level': 'medium',
-        'position': 'Software Engineer',
-        'duration_minutes': 30,
-        'custom_instructions': '',
-        'interview_context': {}
-    }
-    
-    logger.info(f"Generated default config for room {room_name}: {config}")
-    return config
 
-async def start_agent_for_session(session_config: Dict[str, Any]):
-    """Start the interview agent for a specific session (called from Flask routes)"""
-    if not LIVEKIT_AGENTS_AVAILABLE:
-        logger.error("LiveKit agents not available")
-        return False
+async def update_interview_status_prep(session_id: str, status_prep: str, agent_prompt: str = None) -> bool:
+    """Update the status_prep field for an interview session
+    
+    Args:
+        session_id: The interview session ID
+        status_prep: The new status ('PENDING' or 'DONE')
+        agent_prompt: Optional agent prompt to set when status is DONE
         
+    Returns:
+        True if update was successful, False otherwise
+    """
     try:
-        room_name = session_config.get('room_name')
-        if not room_name:
-            logger.error("No room_name provided in session config")
+        # Import here to avoid circular imports
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
+        
+        update_data = {'status_prep': status_prep}
+        if agent_prompt:
+            update_data['agent_prompt'] = agent_prompt
+        
+        result = admin_client.table('mock_interview')\
+            .update(update_data)\
+            .eq('id', session_id)\
+            .execute()
+        
+        if result.data:
+            logger.info(f"Updated interview session {session_id} status_prep to {status_prep}")
+            return True
+        else:
+            logger.warning(f"No rows updated for session_id {session_id}")
             return False
+                        
+    except Exception as e:
+        logger.error(f"Error updating interview status_prep: {e}")
+        return False
+
+async def check_interview_session_ready(session_id: str) -> bool:
+    """Check if an interview session is ready to start (status_prep = DONE)
+    
+    Args:
+        session_id: The interview session ID
         
-        logger.info(f"Starting agent for session: {room_name}")
+    Returns:
+        True if session is ready (status_prep = DONE), False otherwise
+    """
+    try:           
+        # Import here to avoid circular imports
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
         
-        # Store the enhanced session config for the agent to use
-        interview_sessions[room_name] = InterviewSessionState(session_config)
+        result = admin_client.table('mock_interview')\
+            .select('status_prep')\
+            .eq('id', session_id)\
+            .execute()
         
-        return True
+        if result.data:
+            status_prep = result.data[0].get('status_prep', 'PENDING')
+            return status_prep == 'DONE'
+        else:
+            logger.warning(f"No interview session found for session_id {session_id}")
+            return False
+                        
+    except Exception as e:
+        logger.error(f"Error checking interview session readiness: {e}")
+        return False
+
+async def get_interview_session_from_metadata(session_id: str) -> Optional[InterviewContext]:
+    """Get interview context from database by session ID - now creates or gets current attempt"""
+    try:
+        # Import here to avoid circular imports
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
+        
+        # Query mock_interview table (main session)
+        result = admin_client.table('mock_interview')\
+            .select('*')\
+            .eq('id', session_id)\
+            .execute()
+        
+        if not result.data:
+            logger.warning(f"No interview session found for session_id {session_id}")
+            return None
+            
+        session_data = result.data[0]
+        
+        # Check if status_prep is DONE before proceeding
+        status_prep = session_data.get('status_prep', 'PENDING')
+        if status_prep != 'DONE':
+            logger.warning(f"Interview session {session_id} is not ready (status_prep: {status_prep}). Agent will not connect.")
+            return None
+        
+        # Get current attempt or create new one
+        attempt_data = await get_or_create_current_attempt(session_id, admin_client)
+        if not attempt_data:
+            logger.error(f"Could not get or create attempt for session {session_id}")
+            return None
+        
+        return _create_interview_context_from_session_and_attempt(session_data, attempt_data)
         
     except Exception as e:
-        logger.error(f"Error starting agent for session: {str(e)}")
-        return False
+        logger.error(f"Error getting interview context from metadata: {e}")
+        return None
 
-def check_configuration():
-    """Check if required configuration is available"""
-    required_config_vars = [
-        'LIVEKIT_URL',
-        'LIVEKIT_API_KEY', 
-        'LIVEKIT_API_SECRET',
-        'OPENAI_API_KEY'
-    ]
-    
-    def get_config_value(key):
-        """Get configuration value from Flask app config or environment"""
-        if FLASK_AVAILABLE and current_app:
-            return current_app.config.get(key)
-        return os.getenv(key)
-    
-    missing_vars = [var for var in required_config_vars if not get_config_value(var)]
-    
-    if missing_vars:
-        if FLASK_AVAILABLE and current_app:
-            print(f"Missing configuration in AWS Secret Manager: {missing_vars}")
+async def get_interview_session_context(room_name: str) -> Optional[InterviewContext]:
+    """Get interview context from database based on room name - now works with attempts"""
+    try:
+        # Import here to avoid circular imports
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
+        
+        # First, try to find the attempt by room_name
+        attempt_result = admin_client.table('mock_interview_attempts')\
+            .select('*, mock_interview(*)')\
+            .eq('room_name', room_name)\
+            .execute()
+        
+        if attempt_result.data:
+            attempt_data = attempt_result.data[0]
+            session_data = attempt_data['mock_interview']
+            
+            # Check if status_prep is DONE
+            if session_data.get('status_prep', 'PENDING') != 'DONE':
+                logger.warning(f"Interview session is not ready. Agent will not connect.")
+                return None
+            
+            return _create_interview_context_from_session_and_attempt(session_data, attempt_data)
+        
+        # Fallback: try to extract session ID from room name and create attempt
+        import re
+        uuid_pattern = r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})'
+        uuid_matches = re.findall(uuid_pattern, room_name)
+        
+        if uuid_matches:
+            potential_session_id = uuid_matches[-1]
+            logger.info(f"Extracted potential session_id from room name: {potential_session_id}")
+            
+            # Try to find session and create/get attempt
+            session_result = admin_client.table('mock_interview')\
+                .select('*')\
+                .eq('id', potential_session_id)\
+                .execute()
+                
+            if session_result.data:
+                session_data = session_result.data[0]
+                
+                if session_data.get('status_prep', 'PENDING') != 'DONE':
+                    logger.warning(f"Interview session {potential_session_id} is not ready. Agent will not connect.")
+                    return None
+                
+                # Create or get current attempt
+                attempt_data = await get_or_create_current_attempt(potential_session_id, admin_client, room_name)
+                if attempt_data:
+                    return _create_interview_context_from_session_and_attempt(session_data, attempt_data)
+        
+        logger.warning(f"No interview session found for room_name {room_name}")
+        return None
+            
+    except Exception as e:
+        logger.error(f"Error getting interview context by room name: {e}")
+        return None
+
+async def get_or_create_current_attempt(session_id: str, admin_client, room_name: str = None) -> Optional[dict]:
+    """Get current attempt or create a new one if under the 3-attempt limit"""
+    try:
+        # Get existing attempts for this session
+        attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('*')\
+            .eq('mock_interview_id', session_id)\
+            .order('attempt_number', desc=False)\
+            .execute()
+        
+        existing_attempts = attempts_result.data or []
+        
+        # Check for active attempt
+        for attempt in existing_attempts:
+            if attempt['status'] in ['pending', 'active']:
+                logger.info(f"Found existing active attempt {attempt['attempt_number']} for session {session_id}")
+                return attempt
+        
+        # If no active attempt, create new one if under limit
+        next_attempt_number = len(existing_attempts) + 1
+        
+        if next_attempt_number > 3:
+            logger.warning(f"Session {session_id} has already reached maximum 3 attempts")
+            return None
+        
+        # Generate room name if not provided
+        if not room_name:
+            room_name = f"interview_{session_id}_attempt_{next_attempt_number}"
+        
+        # Create new attempt
+        new_attempt = {
+            'mock_interview_id': session_id,
+            'attempt_number': next_attempt_number,
+            'room_name': room_name,
+            'status': 'pending'
+        }
+        
+        insert_result = admin_client.table('mock_interview_attempts')\
+            .insert(new_attempt)\
+            .execute()
+        
+        if insert_result.data:
+            logger.info(f"Created new attempt {next_attempt_number} for session {session_id}")
+            return insert_result.data[0]
         else:
-            print(f"Missing environment variables: {missing_vars}")
-            print("Tip: Use 'python start_agent.py' from project root to load AWS secrets")
-        return False
-    else:
-        print("All required configuration available")
-        return True
+            logger.error(f"Failed to create new attempt for session {session_id}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting or creating attempt: {e}")
+        return None
+
+def _create_interview_context_from_session_and_attempt(session_data: dict, attempt_data: dict) -> InterviewContext:
+    """Create InterviewContext from session and attempt data"""
+    user_display_name = (
+        session_data.get('display_name') or 
+        session_data.get('user_display_name') or 
+        'Candidate'
+    )
+    
+    return InterviewContext(
+        session_id=session_data.get('id', ''),
+        attempt_id=attempt_data.get('id', ''),
+        attempt_number=attempt_data.get('attempt_number', 1),
+        user_id=session_data.get('user_id', ''),
+        user_display_name=user_display_name,
+        resume_text=session_data.get('resume_text', ''),
+        job_description=session_data.get('job_description', ''),
+        company_name=session_data.get('company_name', 'Company'),
+        position=session_data.get('position', 'Software Engineer'),
+        interview_type=session_data.get('interview_type', 'behavioral'),
+        difficulty_level=session_data.get('difficulty_level', 'mid'),
+        custom_instructions=session_data.get('custom_instructions', ''),
+        company_details=session_data.get('company_details', ''),
+        linkedin_profile=session_data.get('linkedin_profile', ''),
+        agent_prompt=session_data.get('agent_prompt', ''),
+        status_prep=session_data.get('status_prep', 'PENDING'),
+        room_name=attempt_data.get('room_name', ''),
+        title=session_data.get('title', ''),
+        attempt_status=attempt_data.get('status', 'pending')
+    )
+
+
+# Note: LiveKit agents handle room disconnection and shutdown automatically
+
+
+# LiveKit job entry point
+async def entrypoint(ctx: JobContext):
+    """Main entry point for LiveKit agent jobs"""
+    logger.info(f"Mock interview agent job started for room: {ctx.room.name}")
+    
+    # Extract interview context from job metadata or room name
+    interview_context = None
+    
+    # Try to get context from job metadata first
+    # Check various ways metadata might be accessible in current LiveKit agents API
+    metadata = None
+    session_id = None
+    
+    # Try different metadata access patterns
+    try:
+        # Method 1: ctx.job.metadata (legacy)
+        if hasattr(ctx, 'job') and hasattr(ctx.job, 'metadata'):
+            metadata = ctx.job.metadata
+            logger.info(f"Found metadata via ctx.job.metadata: {type(metadata)}")
+        
+        # Method 2: Direct ctx metadata
+        elif hasattr(ctx, 'metadata'):
+            metadata = ctx.metadata
+            logger.info(f"Found metadata via ctx.metadata: {type(metadata)}")
+            
+        # Method 3: Job context metadata
+        elif hasattr(ctx, 'job') and hasattr(ctx.job, 'data'):
+            metadata = getattr(ctx.job.data, 'metadata', None)
+            logger.info(f"Found metadata via ctx.job.data.metadata: {type(metadata)}")
+            
+        if metadata is not None:
+            # Handle metadata as either string (JSON) or dict
+            if isinstance(metadata, str) and metadata.strip():
+                # If metadata is a non-empty JSON string, parse it
+                logger.info(f"Job metadata is string: {metadata[:100]}...")
+                metadata_dict = json.loads(metadata)
+                session_id = metadata_dict.get('session_id')
+            elif isinstance(metadata, dict):
+                # If metadata is already a dict, use it directly
+                logger.info(f"Job metadata is dict: {list(metadata.keys())}")
+                session_id = metadata.get('session_id')
+            elif isinstance(metadata, str) and not metadata.strip():
+                logger.warning("Metadata is empty string")
+            else:
+                logger.warning(f"Unexpected metadata type: {type(metadata)}")
+            
+            if session_id:
+                logger.info(f"Found session_id in job metadata: {session_id}")
+                interview_context = await get_interview_session_from_metadata(session_id)
+        else:
+            logger.warning("No metadata found in job context")
+                
+    except Exception as e:
+        logger.error(f"Error processing job metadata: {e}")
+        logger.error(f"Raw metadata: {metadata}")
+    
+    # Fallback: try to get context from room name
+    if not interview_context:
+        interview_context = await get_interview_session_context(ctx.room.name)
+    
+    # Final fallback: create default context
+    if not interview_context:
+        logger.warning("No interview context found or session not ready. Agent will not start.")
+        return
+    
+    # Double-check that the session is ready
+    if interview_context.status_prep != "DONE":
+        logger.warning(f"Interview session {interview_context.session_id} status_prep is {interview_context.status_prep}, not DONE. Agent will not start.")
+        return
+    
+    # Validate that agent_prompt exists before creating agent
+    if not hasattr(interview_context, 'agent_prompt') or not interview_context.agent_prompt or not interview_context.agent_prompt.strip():
+        logger.error(f"No agent_prompt found for session {interview_context.session_id}. Agent cannot start without proper instructions.")
+        return
+    
+    logger.info(f"Agent prompt found for session {interview_context.session_id}. Prompt length: {len(interview_context.agent_prompt)} characters")
+    logger.debug(f"Agent prompt preview: {interview_context.agent_prompt[:200]}...")
+    
+    # Create the interview agent (will use agent_prompt from database only)
+    try:
+        assistant = MockInterviewAgent(interview_context)
+    except ValueError as e:
+        logger.error(f"Failed to create interview agent: {e}")
+        return
+    
+    # Create AgentSession with OpenAI Realtime API (v1.0+ pattern)
+    session = AgentSession(
+        llm=realtime.RealtimeModel(
+            voice=assistant.voice,
+            temperature=assistant.temperature
+        )
+    )
+    
+    # Add event handlers for conversation capture
+    @session.on("conversation_item_added")
+    def on_conversation_item_added(event):
+        """Capture conversation items and save to live transcription"""
+        try:
+            if not hasattr(event, 'item'):
+                return
+                
+            item = event.item
+            item_role = getattr(item, 'role', None)
+            
+            # Skip tool calls
+            if item_role == "assistant" and hasattr(item, 'tool_calls') and item.tool_calls:
+                return
+            
+            # Get text content from the item
+            content = None
+            if hasattr(item, 'text_content'):
+                if callable(item.text_content):
+                    content = item.text_content()
+                else:
+                    content = item.text_content
+            elif hasattr(item, 'content'):
+                content = item.content
+            elif hasattr(item, 'text'):
+                content = item.text
+            
+            if not content or not content.strip():
+                return
+            
+            # Log the conversation item
+            if item_role == "user":
+                logger.info(f"[{interview_context.room_name}] user: {content}")
+                # Save user message to live transcription
+                asyncio.create_task(save_live_transcription(
+                    interview_context.attempt_id,
+                    "candidate",
+                    interview_context.user_display_name,
+                    content.strip()
+                ))
+            elif item_role == "assistant":
+                logger.info(f"[{interview_context.room_name}] assistant: {content}")
+                # Save assistant message to live transcription
+                asyncio.create_task(save_live_transcription(
+                    interview_context.attempt_id,
+                    "interviewer", 
+                    "AI Interviewer",
+                    content.strip()
+                ))
+                
+        except Exception as e:
+            logger.error(f"Error in conversation_item_added handler: {e}")
+
+    # Connect to the room and start the agent
+    await ctx.connect()
+    
+    # Start the session with the agent
+    await session.start(room=ctx.room, agent=assistant)
+    
+    logger.info("Mock interview session started successfully")
 
 def main():
-    """Main entry point for the interview agent"""
-    print("Mock Interview Agent - Production Ready")
-    print("=" * 40)
-    
-    # Check LiveKit agents availability
-    if not LIVEKIT_AGENTS_AVAILABLE:
-        print("LiveKit agents package not available")
-        print("   Please install: pip install livekit-agents[openai]")
-        return
-    else:
-        print("LiveKit agents available")
-    
-    # Check configuration
-    if not check_configuration():
-        return
-    
-    print("\nStarting LiveKit Interview Agent in Production Mode...")
-    
-    try:
-        # Use the correct WorkerOptions for the current LiveKit agents version
-        worker_options = agents.WorkerOptions(entrypoint_fnc=entrypoint)
-        
-        # Set up CLI with worker options
-        agents.cli.run_app(worker_options)
-    except Exception as e:
-        logger.error(f"Error running agent: {str(e)}")
-        print(f"Error running agent: {str(e)}")
+    """Main function to run the mock interview agent"""
 
+    required_env_vars = [
+        'OPENAI_API_KEY',
+        'LIVEKIT_API_KEY', 
+        'LIVEKIT_API_SECRET',
+        'LIVEKIT_URL'
+    ]
+    
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {missing_vars}")
+        return False
+    
+    # Run the agent with correct configuration
+    try:
+        worker_options = agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            port=8081  # Debug port
+        )
+        agents.cli.run_app(worker_options)
+        return True
+    except Exception as e:
+        logger.error(f"Error running agent: {e}")
+        return False
+
+# Main execution for standalone running
 if __name__ == "__main__":
-    main()
+    success = main()
+    exit(0 if success else 1)

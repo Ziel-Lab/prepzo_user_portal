@@ -9,12 +9,15 @@ from dotenv import load_dotenv
 
 # Handle imports for both standalone and package usage
 try:
-    from .agent import initialize_interview_session, LIVEKIT_AGENTS_AVAILABLE
+    from .agent import entrypoint, main as agent_main
+    LIVEKIT_AGENTS_AVAILABLE = True
 except ImportError:
     try:
-        from agent import initialize_interview_session, LIVEKIT_AGENTS_AVAILABLE
+        from agent import entrypoint, main as agent_main
+        LIVEKIT_AGENTS_AVAILABLE = True
     except ImportError:
-        initialize_interview_session = None
+        entrypoint = None
+        agent_main = None
         LIVEKIT_AGENTS_AVAILABLE = False
 
 # Initialize application
@@ -53,12 +56,18 @@ def main():
             logger.error(f"Missing required environment variables: {missing_vars}")
             logger.warning("Interview agent started with missing critical configuration")
         
-        # Run the agent application
-        cli.run_app(
-            WorkerOptions(
-                entrypoint_fnc=initialize_interview_session,
-            ),
-        )
+        # Run the agent application using the realtime entrypoint
+        if entrypoint:
+            cli.run_app(
+                WorkerOptions(
+                    entrypoint_fnc=entrypoint,
+                ),
+            )
+        elif agent_main:
+            # Fallback to standalone main function
+            agent_main()
+        else:
+            logger.error("No valid entrypoint found")
     except Exception as e:
         logger.error(f"Interview agent application error: {str(e)}")
         logger.error(traceback.format_exc())
