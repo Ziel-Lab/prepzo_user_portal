@@ -1335,7 +1335,7 @@ def start_interview_agent(session_id):
         
         # Dispatch agent using LiveKit Agent Dispatch Service (explicit dispatch)
         room_name = session['room_name']
-        agent_name = "mock-interview-agent"
+        agent_name = "mock_interview_agent"
         
         try:
             # Use HTTP API instead of async Python SDK to avoid event loop issues in Flask
