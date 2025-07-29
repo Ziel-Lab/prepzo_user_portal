@@ -226,3 +226,30 @@ def make_profile_public():
     except Exception as e:
         current_app.logger.error(f'Failed to make profile public: {e}', exc_info=True)
         return jsonify({'error': 'Failed to change profile visibility', 'details': str(e)}), 500
+
+
+@profile_bp.route('/make-private', methods=['POST', 'OPTIONS'])
+@require_authentication
+def make_profile_private():
+    """Set the authenticated user's profile back to private."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
+        user_id = str(g.user.id)
+
+        # Simply flip the visibility flag; keep slug for potential future re-publishing
+        supabase.table('user_profiles').upsert({
+            'user_id': user_id,
+            'is_public': False
+        }, on_conflict='user_id').execute()
+
+        return jsonify({'message': 'Profile made private'}), 200
+
+    except Exception as e:
+        current_app.logger.error(f'Failed to make profile private: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to change profile visibility', 'details': str(e)}), 500
