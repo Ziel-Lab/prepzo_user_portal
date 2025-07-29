@@ -190,3 +190,39 @@ def upload_avatar():
     except Exception as e:
         current_app.logger.error(f'Failed to upload avatar: {e}', exc_info=True)
         return jsonify({'error': 'Failed to upload avatar', 'details': str(e)}), 500
+
+@profile_bp.route('/make-public', methods=['POST', 'OPTIONS'])
+@require_authentication
+def make_profile_public():
+    """Mark the authenticated user's profile as public, generating a public slug
+    if one does not yet exist.
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
+        user_id = str(g.user.id)
+
+        # Retrieve existing slug if any to keep URLs stable
+        existing = supabase.table('user_profiles').select('public_slug').eq('user_id', user_id).maybe_single().execute()
+        public_slug = None
+        if existing and existing.data and existing.data.get('public_slug'):
+            public_slug = existing.data['public_slug']
+        else:
+            public_slug = uuid.uuid4().hex[:8]  # simple unique slug
+
+        supabase.table('user_profiles').upsert({
+            'user_id': user_id,
+            'is_public': True,
+            'public_slug': public_slug
+        }, on_conflict='user_id').execute()
+
+        return jsonify({'message': 'Profile made public', 'public_slug': public_slug}), 200
+
+    except Exception as e:
+        current_app.logger.error(f'Failed to make profile public: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to change profile visibility', 'details': str(e)}), 500
