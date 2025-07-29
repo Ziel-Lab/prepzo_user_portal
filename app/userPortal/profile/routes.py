@@ -253,3 +253,34 @@ def make_profile_private():
     except Exception as e:
         current_app.logger.error(f'Failed to make profile private: {e}', exc_info=True)
         return jsonify({'error': 'Failed to change profile visibility', 'details': str(e)}), 500
+
+
+@profile_bp.route('/public/<string:slug>', methods=['GET', 'OPTIONS'])
+def get_public_profile(slug):
+    """Return a public user profile by slug.
+
+    Only profiles marked `is_public = true` are returned. If not found, 404."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    try:
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
+        response = supabase.table('user_profiles').select('*').eq('public_slug', slug).eq('is_public', True).maybe_single().execute()
+
+        if not response or not response.data:
+            return jsonify({'error': 'Profile not found or not public'}), 404
+
+        # Optionally redact sensitive fields
+        public_data = response.data.copy()
+        public_data.pop('email', None)
+        public_data.pop('phone', None)
+        public_data.pop('resume_url', None)
+
+        return jsonify({'profile': public_data}), 200
+
+    except Exception as e:
+        current_app.logger.error(f'Failed to fetch public profile for slug {slug}: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to fetch public profile', 'details': str(e)}), 500
