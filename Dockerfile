@@ -21,4 +21,5 @@ EXPOSE 5000
 # you'd typically use a production-grade WSGI server like Gunicorn.
 
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "run:app"] 
+RUN chmod +x entrypoint.sh
+CMD ["./entrypoint.sh"] 

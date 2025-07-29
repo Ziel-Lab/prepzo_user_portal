@@ -794,7 +794,7 @@ def join_interview_session(session_id):
                 # Dispatch agent via HTTP API
                 dispatch_url = f"{api_url}/twirp/livekit.AgentDispatchService/CreateDispatch"
                 
-                agent_name = "mock_interview_agent"  # Should match your agent name
+                agent_name = "mock_interview_agent"
                 dispatch_payload = {
                     'agent_name': agent_name,
                     'room': attempt_room_name,

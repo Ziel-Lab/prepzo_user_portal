@@ -190,8 +190,8 @@ def get_agent_token(room_name):
             return None
         
         # Create access token for AI agent
-        token = AccessToken(livekit_api_key, livekit_api_secret) \
-            .with_identity("interview_agent") \
+            token = AccessToken(livekit_api_key, livekit_api_secret) \
+        .with_identity("mock_interview_agent") \
             .with_name("Interview AI") \
             .with_grants(VideoGrants(
                 room_join=True,
