@@ -284,3 +284,49 @@ def get_public_profile(slug):
     except Exception as e:
         current_app.logger.error(f'Failed to fetch public profile for slug {slug}: {e}', exc_info=True)
         return jsonify({'error': 'Failed to fetch public profile', 'details': str(e)}), 500
+
+
+@profile_bp.route('/edit-slug', methods=['POST', 'OPTIONS'])
+@require_authentication
+def edit_public_slug():
+    """Allow the authenticated user to change their public slug.
+
+    Expects JSON: { "new_slug": "desired-slug" }
+    Slug must be unique across all public profiles and consist of
+    alphanumerics plus hyphen/underscore.
+    """
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json(silent=True) or {}
+    new_slug = (data.get('new_slug') or '').strip()
+
+    if not new_slug:
+        return jsonify({'error': 'new_slug is required'}), 400
+
+    import re
+    if not re.fullmatch(r'[A-Za-z0-9_-]{3,32}', new_slug):
+        return jsonify({'error': 'Slug must be 3-32 chars, letters, numbers, hyphen or underscore'}), 400
+
+    try:
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
+        user_id = str(g.user.id)
+
+        # Check uniqueness (slug can be in use by this user already)
+        existing = supabase.table('user_profiles').select('user_id').eq('public_slug', new_slug).maybe_single().execute()
+        if existing and existing.data and existing.data.get('user_id') != user_id:
+            return jsonify({'error': 'Slug already in use'}), 409
+
+        supabase.table('user_profiles').upsert({
+            'user_id': user_id,
+            'public_slug': new_slug
+        }, on_conflict='user_id').execute()
+
+        return jsonify({'message': 'Slug updated', 'public_slug': new_slug}), 200
+
+    except Exception as e:
+        current_app.logger.error(f'Failed to edit public slug: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to edit slug', 'details': str(e)}), 500
