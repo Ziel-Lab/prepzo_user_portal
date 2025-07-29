@@ -9,7 +9,7 @@ GUNICORN_PID=$!
 sleep 5
 
 # Start the LiveKit agent in the background
-python start_agent.py &
+python run_all.py &
 AGENT_PID=$!
 
 # Handle shutdown
