@@ -79,10 +79,18 @@ async def store_interview_results(room_name: str, interview_results: dict):
     """
     Store interview results in database - now works with attempts
     
+    DISABLED: This function conflicts with agent.py and routes.py updates
+    causing race conditions. Status and duration are now handled by:
+    - agent.py: save_live_transcription (real-time during interview)
+    - routes.py: save_attempt_transcription (frontend calls)
+    
     Args:
         room_name (str): The room name
         interview_results (dict): The interview results
     """
+    logger.info(f"store_interview_results called for {room_name} but DISABLED to prevent conflicts")
+    return  # DISABLED - preventing race conditions with agent.py updates
+    
     try:
         if not supabase:
             logger.warning("Supabase not available, cannot store interview results")

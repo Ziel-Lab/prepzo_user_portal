@@ -3,13 +3,34 @@ from flask import jsonify, g, request, current_app, make_response
 from app import extensions 
 from functools import wraps
 import calendar
+import time
 from postgrest.exceptions import APIError
-from gotrue.errors import AuthApiError
+from gotrue.errors import AuthApiError, AuthRetryableError
 from dateutil.relativedelta import relativedelta
 
 
 class QuotaExceededError(Exception):
     pass
+
+def _retry_auth_with_backoff(admin_client, jwt_token, max_retries=3):
+    """
+    Retry authentication with exponential backoff for AuthRetryableError
+    """
+    for attempt in range(max_retries):
+        try:
+            return admin_client.auth.get_user(jwt_token)
+        except AuthRetryableError as e:
+            if attempt == max_retries - 1:
+                # Last attempt, re-raise the error
+                raise e
+            
+            # Exponential backoff: 0.1s, 0.2s, 0.4s
+            delay = 0.1 * (2 ** attempt)
+            current_app.logger.warning(f"Auth retry {attempt + 1}/{max_retries} failed with {type(e).__name__}, retrying in {delay}s...")
+            time.sleep(delay)
+    
+    # This should never be reached, but just in case
+    raise AuthRetryableError("Max retries exceeded")
 
 def require_authentication(f):
     """
@@ -51,8 +72,8 @@ def require_authentication(f):
             admin_client = extensions.get_admin_client()
             user_client = extensions.get_user_client()
             
-            # Use admin client to verify JWT token (this validates the token exists and is valid)
-            user_response = admin_client.auth.get_user(jwt_token)
+            # Use admin client to verify JWT token with retry for network issues
+            user_response = _retry_auth_with_backoff(admin_client, jwt_token)
             user = user_response.user
             if not user or not user.id:
                 raise ValueError("Supabase did not return a user object in the response.")
@@ -78,6 +99,9 @@ def require_authentication(f):
         except AuthApiError as e:
             current_app.logger.warning(f"Authentication failed: Stale JWT from IP {request.remote_addr}")
             return jsonify({"error": "Your session has expired. Please log in again."}), 401
+        except AuthRetryableError as e:
+            current_app.logger.error(f"Authentication failed after retries due to network issues from IP {request.remote_addr}: {str(e)}")
+            return jsonify({"error": "Authentication service temporarily unavailable. Please try again in a moment."}), 503
         except APIError as e:
             current_app.logger.error(f"Authentication API call failed from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
             status_code = getattr(e, 'status', 401) 

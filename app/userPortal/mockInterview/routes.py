@@ -16,36 +16,7 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Define interview types directly
-INTERVIEW_TYPES = {
-    'behavioral': 'Behavioral Interview',
-    'technical': 'Technical Interview', 
-    'system_design': 'System Design Interview',
-    'case_study': 'Case Study Interview'
-}
 
-def get_interview_prompt(interview_type: str, difficulty_level: str, position: str, custom_instructions: str = '') -> str:
-    """Generate interview prompt based on type and context"""
-    
-    base_prompts = {
-        'behavioral': f"""You are conducting a behavioral interview for the {position} position. 
-        Focus on past experiences, STAR method responses, and cultural fit. Difficulty level: {difficulty_level}.
-        {custom_instructions}""",
-        
-        'technical': f"""You are conducting a technical interview for the {position} position.
-        Ask coding problems, system design questions, and technical concepts relevant to the role. 
-        Difficulty level: {difficulty_level}. {custom_instructions}""",
-        
-        'system_design': f"""You are conducting a system design interview for the {position} position.
-        Present architectural challenges and evaluate scalability thinking. Difficulty level: {difficulty_level}.
-        {custom_instructions}""",
-        
-        'case_study': f"""You are conducting a case study interview for the {position} position.
-        Present business scenarios and evaluate problem-solving approach. Difficulty level: {difficulty_level}.
-        {custom_instructions}"""
-    }
-    
-    return base_prompts.get(interview_type, base_prompts['behavioral'])
 
 def get_display_status(status, status_prep):
     """
@@ -146,7 +117,6 @@ def extract_pdf_text(pdf_content):
         return text.strip()
         
     except Exception as e:
-        logger.error(f"Error extracting PDF text: {str(e)}")
         return f"Error extracting PDF content: {str(e)}"
 
 def get_resume_content_by_document_id(user_id, document_id):
@@ -209,121 +179,16 @@ def get_cover_letter_content_by_document_id(user_id, document_id):
         logger.error(f"Error getting cover letter content: {str(e)}")
         return None, str(e)
 
-async def generate_swot_analysis(session, transcript):
-    """Generate SWOT analysis from interview transcript using OpenAI"""
-    try:
-        openai_api_key = current_app.config.get('OPENAI_API_KEY')
-        if not openai_api_key:
-            logger.error("OPENAI_API_KEY not found in configuration")
-            return None
-        
-        # Set up OpenAI client
-        client = openai.OpenAI(api_key=openai_api_key)
-        
-        # Build context for SWOT analysis
-        position = session.get('position', 'Software Engineer')
-        company_name = session.get('company_name', 'the company')
-        interview_type = session.get('interview_type', 'behavioral')
-        job_description = session.get('job_description', '')
-        resume_text = session.get('resume_text', '')
-        
-        swot_prompt = f"""
-Analyze the following mock interview transcript and generate a comprehensive SWOT analysis for the candidate.
-
-CONTEXT:
-- Position: {position} at {company_name}
-- Interview Type: {interview_type}
-- Job Description: {job_description}
-- Candidate's Resume: {resume_text}
-
-INTERVIEW TRANSCRIPT:
-{transcript}
-
-Please provide a detailed SWOT analysis in the following JSON format:
-
-{{
-    "strengths": [
-        "Specific strength 1 with example from interview",
-        "Specific strength 2 with example from interview",
-        "..."
-    ],
-    "weaknesses": [
-        "Area for improvement 1 with specific example",
-        "Area for improvement 2 with specific example", 
-        "..."
-    ],
-    "opportunities": [
-        "Growth opportunity 1 based on their background",
-        "Skill development area that could benefit their career",
-        "..."
-    ],
-    "threats": [
-        "Potential challenge or gap relative to the role",
-        "Competitive disadvantage they should address",
-        "..."
-    ],
-    "overall_score": 85,
-    "overall_feedback": "Summary of overall performance with specific examples",
-    "key_recommendations": [
-        "Specific actionable recommendation 1",
-        "Specific actionable recommendation 2",
-        "..."
-    ],
-    "interviewer_notes": "Additional insights from the interview that would help HR/hiring managers"
-}}
-
-Focus on:
-1. Specific examples from the interview transcript
-2. How their responses align with the job requirements
-3. Communication skills and presentation
-4. Technical knowledge (if applicable)
-5. Cultural fit and soft skills
-6. Areas where they excelled or struggled
-7. Actionable advice for improvement
-
-Be constructive, specific, and reference actual parts of the interview.
-"""
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an expert interview analyst and career coach. Provide detailed, constructive, and actionable feedback based on interview performance."},
-                {"role": "user", "content": swot_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=2000
-        )
-        
-        # Parse JSON response
-        import json
-        swot_analysis = json.loads(response.choices[0].message.content)
-        
-        logger.info(f"Generated SWOT analysis for session {session.get('id')}")
-        return swot_analysis
-        
-    except Exception as e:
-        logger.error(f"Error generating SWOT analysis: {str(e)}")
-        return {
-            "error": "Failed to generate SWOT analysis",
-            "message": str(e),
-            "strengths": ["Unable to analyze - please review transcript manually"],
-            "weaknesses": ["Analysis generation failed"],
-            "opportunities": ["Manual review recommended"],
-            "threats": ["Technical error in analysis"],
-            "overall_score": 0,
-            "overall_feedback": "SWOT analysis could not be generated due to technical error",
-            "key_recommendations": ["Please contact support for manual analysis"],
-            "interviewer_notes": f"Error: {str(e)}"
-        }
-
 @mock_interview_bp.route('/create-session', methods=['POST'])
 @require_authentication
 def create_interview_session():
     """Create a new mock interview session with enhanced context"""
     try:
-        logger.info("=== Starting create_interview_session ===")
         data = request.get_json()
-        logger.info(f"Request data keys: {list(data.keys()) if data else 'None'}")
+        
+        # EMERGENCY DEBUG - This will definitely show up
+        logger.info("EMERGENCY DEBUG - RAW REQUEST DATA:")
+        logger.info(str(data))
         
         # Check user's session limits before creating
         admin_client = get_admin_client()
@@ -357,7 +222,6 @@ def create_interview_session():
             .execute()
         
         if not plan_result.data:
-            logger.warning(f"No subscription plan found for plan_id {plan_id}")
             session_limit = 0 if plan_id == 1 else 3
         else:
             session_limit = plan_result.data[0].get('mock_interview_session', 0)
@@ -386,14 +250,12 @@ def create_interview_session():
                 'current_plan': plan_name
             }), 403
         
-        # Basic interview parameters
-        interview_type = data.get('interview_type', 'behavioral')
+        # Basic interview parameters - extract from request data
+        interview_type = data.get('type') or data.get('interview_type', 'behavioral')
         difficulty_level = data.get('difficulty_level', 'medium')
-        position = data.get('position', 'Software Engineer')
-        duration_minutes = 20  # Always 20 minutes regardless of input
-        
-        logger.info(f"Basic params - type: {interview_type}, position: {position}")
-        
+        position = data.get('role') or data.get('position', 'Software Engineer')
+        duration_minutes = 15  # Always 15 minutes regardless of input
+               
         # Enhanced context data from form - handle both frontend formats
         title = data.get('title', 'Mock Interview Session')
         resume_text = data.get('resume_text', '')
@@ -408,31 +270,37 @@ def create_interview_session():
         
         # Handle both jobDescription (NewSessionModal) and job_description formats  
         job_description = data.get('jobDescription') or data.get('job_description', '')
-        # Handle both company (NewSessionModal) and company_name formats
-        company_name = data.get('company') or data.get('company_name', '')
+        
+        # Handle company data - frontend sends both 'company' and 'company_name' fields  
+        # Store the company URL directly in company_name column
+        
+        # EMERGENCY DEBUG - Check all company fields
+        logger.info("EMERGENCY DEBUG - COMPANY FIELDS:")
+        logger.info(f"data.get('company_name'): '{data.get('company_name', 'NOT_FOUND')}'")
+        logger.info(f"data.get('company'): '{data.get('company', 'NOT_FOUND')}'") 
+        logger.info(f"data.get('companyUrl'): '{data.get('companyUrl', 'NOT_FOUND')}'")
+        logger.info(f"data.get('company_url'): '{data.get('company_url', 'NOT_FOUND')}'")
+        
+        company_url = data.get('company_url', '') or data.get('company_name', '') or data.get('company', '') or data.get('companyUrl', '')
+        company_name = company_url  # Store URL directly as company_name
+        
+        logger.info(f"FINAL COMPANY VALUES - company_url: '{company_url}', company_name: '{company_name}'")
+        
+
+        
         # Handle both description (NewSessionModal) and custom_instructions formats
         custom_instructions = data.get('description') or data.get('custom_instructions', '')
         
         # Normalize interview type (handle both hyphen and underscore formats)
         normalized_interview_type = interview_type.replace('-', '_')
         
-        # Validate interview type
-        if normalized_interview_type not in INTERVIEW_TYPES:
-            return jsonify({
-                'error': 'Invalid interview type',
-                'valid_types': list(INTERVIEW_TYPES.keys()),
-                'received': interview_type,
-                'normalized': normalized_interview_type
-            }), 400
-        
+        # Allow any interview type - no validation needed
         # Use normalized type for consistency
         interview_type = normalized_interview_type
-        logger.info(f"Interview type validated and normalized: {interview_type}")
         
         # Handle resume content with proper priority logic
         # Priority order: document_id > explicit resume_url > auto-fetch most recent
         # This ensures user selections are always respected over automatic substitution
-        logger.info(f"Resume handling - document_id: {resume_document_id}, resume_url: {'Yes' if resume_url else 'No'}")
         
         if resume_document_id:
             # Priority 1: User selected a specific document by ID
@@ -444,20 +312,20 @@ def create_interview_session():
             resume_text = extracted_resume_text
             
             # Get the exact document URL as stored in the database (exactly what user selected)
-            user_client = get_user_client()
-            doc_result = user_client.table('user_documents')\
-                .select('document_url')\
-                .eq('id', resume_document_id)\
-                .eq('uid', g.user.id)\
-                .execute()
-            if doc_result.data:
-                # Use the exact URL from the database without any modifications
-                resume_url = doc_result.data[0]['document_url']
-                logger.info(f"Using exact document URL from database: {resume_url}")
+            try:
+                admin_client = get_admin_client()
+                doc_result = admin_client.table('user_documents')\
+                    .select('document_url')\
+                    .eq('id', resume_document_id)\
+                    .eq('uid', g.user.id)\
+                    .execute()
+                if doc_result.data:
+                    # Use the exact URL from the database without any modifications
+                    resume_url = doc_result.data[0]['document_url']
+            except Exception as e:
+                logger.warning(f"Failed to get document URL for resume_document_id {resume_document_id}: {e}")
         
         # Handle cover letter content (optional)
-        logger.info(f"Cover letter handling - document_id: {cover_letter_document_id}, cover_letter_url: {'Yes' if cover_letter_url else 'No'}")
-        
         if cover_letter_document_id:
             # User selected a specific cover letter document by ID
             extracted_cover_letter_text, error = get_cover_letter_content_by_document_id(g.user.id, cover_letter_document_id)
@@ -468,43 +336,38 @@ def create_interview_session():
                 cover_letter_text = extracted_cover_letter_text
             
             # Get the cover letter document URL
-            user_client = get_user_client()
-            cover_doc_result = user_client.table('user_documents')\
-                .select('document_url')\
-                .eq('id', cover_letter_document_id)\
-                .eq('uid', g.user.id)\
-                .execute()
-            if cover_doc_result.data:
-                cover_letter_url = cover_doc_result.data[0]['document_url']
-                logger.info(f"Using cover letter URL from database: {cover_letter_url}")
+            try:
+                admin_client = get_admin_client()
+                cover_doc_result = admin_client.table('user_documents')\
+                    .select('document_url')\
+                    .eq('id', cover_letter_document_id)\
+                    .eq('uid', g.user.id)\
+                    .execute()
+                if cover_doc_result.data:
+                    cover_letter_url = cover_doc_result.data[0]['document_url']
+            except Exception as e:
+                logger.warning(f"Failed to get document URL for cover_letter_document_id {cover_letter_document_id}: {e}")
                 
         elif cover_letter_url and not cover_letter_text:
             # User provided cover letter URL but no text - extract it
             try:
-                logger.info("Extracting cover letter text from provided URL...")
                 cover_letter_text = extract_resume_text_from_url(cover_letter_url) or "Cover letter content extraction in progress..."
-                logger.info(f"Cover letter text extracted: {len(cover_letter_text)} characters")
             except Exception as e:
                 logger.warning(f"Could not extract cover letter text from provided URL: {e}")
                 cover_letter_text = "Cover letter uploaded - content extraction in progress..."
         
         elif resume_url:
             # Priority 2: User explicitly provided a resume URL - respect their choice
-            logger.info(f"Using user-provided resume URL for user {g.user.id}")
-            logger.info(f"User provided resume_url: {resume_url}")
             # Extract text from the provided URL if resume_text is not already provided
             if not resume_text:
                 try:
-                    logger.info("Extracting resume text from provided URL...")
                     resume_text = extract_resume_text_from_url(resume_url) or "Resume content extraction in progress..."
-                    logger.info(f"Resume text extracted: {len(resume_text)} characters")
                 except Exception as e:
                     logger.warning(f"Could not extract resume text from provided URL: {e}")
                     resume_text = "Resume uploaded - content extraction in progress..."
         
         elif not resume_text and not resume_url:
             # Priority 3: No resume data provided at all - only then auto-fetch most recent
-            logger.info(f"No resume data provided, fetching most recent resume for user {g.user.id}")
             try:
                 # Direct database query for most recent resume
                 try:
@@ -525,7 +388,6 @@ def create_interview_session():
                     resume_doc = resume_result.data[0]
                     resume_url = resume_doc['document_url']
                     resume_document_id = resume_doc['id']
-                    logger.info(f"Found resume: {resume_doc['document_name']}")
                     
                     # Try to extract text from resume (optional - can fail)
                     try:
@@ -544,17 +406,7 @@ def create_interview_session():
                 return jsonify({
                     'error': 'Failed to fetch resume. Please try again.'
                 }), 400
-        
-        # Final validation for required fields
-        logger.info(f"Resume handling summary:")
-        logger.info(f"  - User provided resume_document_id: {resume_document_id}")
-        logger.info(f"  - User provided resume_url: {'Yes' if resume_url else 'No'}")
-        logger.info(f"  - Resume text extracted: {len(resume_text) if resume_text else 0} chars")
-        logger.info(f"Cover letter handling summary:")
-        logger.info(f"  - User provided cover_letter_document_id: {cover_letter_document_id}")
-        logger.info(f"  - User provided cover_letter_url: {'Yes' if cover_letter_url else 'No'}")
-        logger.info(f"  - Cover letter text extracted: {len(cover_letter_text) if cover_letter_text else 0} chars")
-        logger.info(f"  - Job description length: {len(job_description)} chars")
+       
         
         if not job_description or len(job_description.strip()) < 10:
             logger.error(f"Job description validation failed: '{job_description}'")
@@ -562,25 +414,19 @@ def create_interview_session():
                 'error': 'Job description is required and must be at least 10 characters'
             }), 400
         
-        logger.info("Job description validation passed")
-        
         # Get user's display name
         user_display_name = get_user_display_name(g.user)
-        logger.info(f"User display name: {user_display_name}")
         
         # Generate unique session ID
         session_id = str(uuid.uuid4())
         # Try different room name format to avoid URL validation
         room_name = f"session-{session_id}"  # Use hyphen instead of underscore
-        logger.info(f"Generated session_id: {session_id}, room_name: {room_name}")
         
         # Create LiveKit room
-        logger.info("Creating LiveKit room...")
         room_response = asyncio.run(create_interview_room(room_name))
         if not room_response:
             logger.error("Failed to create LiveKit room")
             return jsonify({'error': 'Failed to create interview room'}), 500
-        logger.info("LiveKit room created successfully")
         
         # Prepare interview context for AI agent (ensure JSON serializable)
         interview_context = {
@@ -590,6 +436,7 @@ def create_interview_session():
             'cover_letter_url': cover_letter_url or '',
             'job_description': job_description or '',
             'company_name': company_name or '',
+            'company_url': company_url or '',
             'position': position or '',
             'interview_type': interview_type or '',
             'difficulty_level': difficulty_level or '',
@@ -604,8 +451,8 @@ def create_interview_session():
             'interview_type': interview_type,
             'difficulty_level': difficulty_level,
             'position': position,
-            'company_name': company_name or '',
-            'duration_minutes': duration_minutes,  # Always 20 minutes
+            'company_name': company_name or '',  # Store the company URL in company_name column
+            'duration_minutes': duration_minutes,  # Always 15 minutes
             'resume_url': resume_url if resume_url else None,  # Ensure null if empty
             'resume_document_id': resume_document_id if resume_document_id else None,
             'cover_letter_url': cover_letter_url if cover_letter_url else None,  # New column
@@ -619,23 +466,16 @@ def create_interview_session():
             'status_prep': 'PENDING'  # NEW: Triggers n8n webhook workflow
         }
         
-        # Use admin client for creating new session records
-        logger.info("Getting admin client for session creation...")
-        logger.info(f"Current app extensions keys: {list(current_app.extensions.keys()) if hasattr(current_app, 'extensions') else 'No extensions'}")
-        
+       
         # Try to get admin client with comprehensive error handling
         admin_client = None
         try:
-            logger.info("Attempting to get admin client via get_admin_client()...")
             admin_client = get_admin_client()
-            logger.info(f"Admin client obtained via function: {admin_client is not None}")
         except RuntimeError as e:
             logger.error(f"Admin client not available via function: {e}")
             # Try fallback via app extensions
             try:
-                logger.info("Trying fallback via app.extensions...")
                 admin_client = current_app.extensions.get('supabase_admin')
-                logger.info(f"Admin client obtained via extensions: {admin_client is not None}")
             except Exception as fallback_e:
                 logger.error(f"Fallback also failed: {fallback_e}")
         except Exception as e:
@@ -645,8 +485,6 @@ def create_interview_session():
             logger.error("No admin client available - server configuration error")
             return jsonify({'error': 'Server configuration error - database not available'}), 500
             
-        logger.info("Attempting to insert session data...")
-        
         try:
             # Simple essential insert approach
             essential_data = {
@@ -655,20 +493,17 @@ def create_interview_session():
                 'room_name': room_name,
                 'status_prep': 'PENDING'
             }
-            logger.info(f"Trying essential insert: {essential_data}")
             result = admin_client.table('mock_interview').insert(essential_data).execute()
-            logger.info("Essential insert successful!")
             
             # If successful, add all other fields via update
             if result.data:
-                logger.info("Essential insert successful, adding more fields...")
                 update_data = {
                     'title': title or 'Mock Interview Session',
                     'interview_type': interview_type,
                     'difficulty_level': difficulty_level,
                     'position': position,
                     'company_name': company_name or '',
-                    'duration_minutes': duration_minutes,  # Always 20 minutes
+                    'duration_minutes': duration_minutes,  # Always 15 minutes
                     'resume_document_id': resume_document_id if resume_document_id else None,
                     'cover_letter_text': cover_letter_text if cover_letter_text else None,
                     'job_description': job_description,
@@ -678,16 +513,25 @@ def create_interview_session():
                     'display_name': user_display_name,
                     'interview_context': interview_context
                 }
+                
+                # Debug logging for database update
+                logger.info(f"About to update database - company_name: '{update_data.get('company_name')}', company_url: '{company_url}'")
+                logger.info("EMERGENCY DEBUG - FULL UPDATE DATA:")
+                logger.info(f"update_data['company_name'] = '{update_data.get('company_name')}'")
+                logger.info(f"company_name variable = '{company_name}'")
+                logger.info(f"company_url variable = '{company_url}'")
+                
                 try:
-                    admin_client.table('mock_interview').update(update_data).eq('id', session_id).execute()
-                    logger.info("Successfully updated session with all fields")
+                    result = admin_client.table('mock_interview').update(update_data).eq('id', session_id).execute()
+                except Exception as main_update_error:
+                    logger.error(f"Main update failed: {main_update_error}")
+                    logger.error(f"Update data that failed: {update_data}")
+                    # Continue with individual field updates
                     
                     # Now try to add resume_url and cover_letter_url separately (using exact URLs from documents)
                     if resume_url:
                         try:
-                            logger.info(f"Attempting to update resume_url with exact value: {resume_url}")
                             admin_client.table('mock_interview').update({'resume_url': resume_url}).eq('id', session_id).execute()
-                            logger.info("Successfully updated resume_url with exact document URL")
                         except Exception as resume_error:
                             logger.warning(f"Failed to update resume_url (proceeding anyway): {resume_error}")
                             logger.warning(f"Resume URL that failed: {resume_url}")
@@ -695,34 +539,54 @@ def create_interview_session():
                     
                     if cover_letter_url:
                         try:
-                            logger.info(f"Attempting to update cover_letter_url with exact value: {cover_letter_url}")
                             admin_client.table('mock_interview').update({'cover_letter_url': cover_letter_url}).eq('id', session_id).execute()
-                            logger.info("Successfully updated cover_letter_url with exact document URL")
                         except Exception as cover_letter_error:
                             logger.warning(f"Failed to update cover_letter_url (proceeding anyway): {cover_letter_error}")
                             logger.warning(f"Cover letter URL that failed: {cover_letter_url}")
                             # Session still works without cover_letter_url
+                    
+                    # Update company_name separately to ensure it's saved
+                    if company_name:
+                        try:
+                            logger.info(f"Attempting to update company_name with exact value: {company_name}")
+                            admin_client.table('mock_interview').update({'company_name': company_name}).eq('id', session_id).execute()
+                            logger.info("Successfully updated company_name")
+                        except Exception as company_error:
+                            logger.error(f"Failed to update company_name: {company_error}")
+                            logger.error(f"Company name that failed: {company_name}")
+                    else:
+                        logger.warning("company_name is empty, skipping company_name update")
+
                             
                 except Exception as update_error:
                     logger.warning(f"Failed to update additional fields: {update_error}")
                     # Try to add URLs even if other fields failed (using exact document URLs)
                     if resume_url:
                         try:
-                            logger.info(f"Fallback: attempting resume_url update with: {resume_url}")
                             admin_client.table('mock_interview').update({'resume_url': resume_url}).eq('id', session_id).execute()
-                            logger.info("Successfully updated resume_url despite other field failures")
                         except Exception as resume_error:
                             logger.warning(f"Failed to update resume_url in fallback: {resume_error}")
                             logger.warning(f"Problematic resume URL: {resume_url}")
                     
                     if cover_letter_url:
                         try:
-                            logger.info(f"Fallback: attempting cover_letter_url update with: {cover_letter_url}")
                             admin_client.table('mock_interview').update({'cover_letter_url': cover_letter_url}).eq('id', session_id).execute()
-                            logger.info("Successfully updated cover_letter_url despite other field failures")
                         except Exception as cover_letter_error:
                             logger.warning(f"Failed to update cover_letter_url in fallback: {cover_letter_error}")
                             logger.warning(f"Problematic cover letter URL: {cover_letter_url}")
+                    
+                    # Fallback: Update company_name separately
+                    if company_name:
+                        try:
+                            logger.info(f"Fallback: attempting company_name update with: {company_name}")
+                            admin_client.table('mock_interview').update({'company_name': company_name}).eq('id', session_id).execute()
+                            logger.info("Successfully updated company_name despite other field failures")
+                        except Exception as company_error:
+                            logger.error(f"Failed to update company_name in fallback: {company_error}")
+                            logger.error(f"Problematic company name: {company_name}")
+                    else:
+                        logger.warning("company_name is empty in fallback, skipping company_name update")
+
                     # Continue anyway, basic session was created
             
             # Final success check
@@ -736,19 +600,17 @@ def create_interview_session():
                         })\
                         .eq('user_id', user_id)\
                         .execute()
-                    logger.info(f"Updated session count to {current_sessions + 1} for user {user_id[:8]}***")
                 except Exception as counter_error:
                     logger.warning(f"Failed to update session counter: {counter_error}")
                     # Don't fail the session creation for counter issues
-                
-                logger.info(f"Session created successfully: {session_id}")
                 return jsonify({
                     'session_id': session_id,
                     'room_name': room_name,
                     'interview_type': interview_type,
                     'position': position,
-                    'company_name': company_name,
-                    'duration_minutes': duration_minutes,  # Always 20 minutes
+                    'company_name': company_name,  # Contains the company URL
+                    'company_url': company_url,    # Same as company_name for frontend compatibility
+                    'duration_minutes': duration_minutes,  # Always 15 minutes
                     'status': 'created',
                     'context_loaded': bool(resume_text or resume_url),
                     'resume_auto_extracted': bool(resume_document_id),
@@ -840,10 +702,16 @@ def join_interview_session(session_id):
             .eq('id', session_id)\
             .execute()
         
-        admin_client.table('mock_interview_attempts')\
+        logger.info(f"Setting started_at timestamp for attempt {attempt_result.data[0]['id']}")
+        attempt_update_result = admin_client.table('mock_interview_attempts')\
             .update({'status': 'active', 'started_at': 'now()'})\
             .eq('id', attempt_result.data[0]['id'])\
             .execute()
+        
+        if attempt_update_result.data:
+            logger.info(f"Successfully set started_at for attempt {attempt_result.data[0]['id']}")
+        else:
+            logger.error(f"Failed to set started_at for attempt {attempt_result.data[0]['id']}")
         
         # Update attempt counter in feature_usage
         try:
@@ -876,6 +744,79 @@ def join_interview_session(session_id):
             'is_ready_to_join': display_info['is_ready_to_join'],
             'color_class': display_info['color_class']
         }
+        
+        # CRITICAL FIX: Dispatch agent with metadata for subsequent attempts
+        # This ensures the agent can connect to attempt 2, 3, etc.
+        try:
+            user_display_name = session.get('display_name') or get_user_display_name(g.user)
+            
+            # Prepare metadata for the agent (same as start-agent endpoint)
+            agent_metadata = {
+                'session_id': session_id,
+                'user_id': str(g.user.id),
+                'user_display_name': user_display_name,
+                'interview_type': session.get('interview_type', 'behavioral'),
+                'position': session.get('position', 'Software Engineer'),
+                'company_name': session.get('company_name', 'Company'),
+                'difficulty_level': session.get('difficulty_level', 'mid')
+            }
+            
+            # Dispatch agent to the attempt room
+            import requests
+            import jwt
+            import time
+            
+            livekit_api_key = current_app.config.get('LIVEKIT_API_KEY')
+            livekit_api_secret = current_app.config.get('LIVEKIT_API_SECRET')
+            livekit_url = current_app.config.get('LIVEKIT_URL')
+            
+            if all([livekit_api_key, livekit_api_secret, livekit_url]):
+                # Create JWT token for authentication
+                now = int(time.time())
+                token_payload = {
+                    'iss': livekit_api_key,
+                    'exp': now + 600,  # 10 minutes
+                    'nbf': now,
+                    'video': {
+                        'room': attempt_room_name,
+                        'roomJoin': True,
+                        'roomAdmin': True
+                    }
+                }
+                
+                auth_token = jwt.encode(token_payload, livekit_api_secret, algorithm='HS256')
+                
+                # Convert WebSocket URL to HTTP
+                api_url = livekit_url.replace('ws://', 'http://').replace('wss://', 'https://')
+                if api_url.endswith('/'):
+                    api_url = api_url[:-1]
+                
+                # Dispatch agent via HTTP API
+                dispatch_url = f"{api_url}/twirp/livekit.AgentDispatchService/CreateDispatch"
+                
+                agent_name = "mock_interview_agent"  # Should match your agent name
+                dispatch_payload = {
+                    'agent_name': agent_name,
+                    'room': attempt_room_name,
+                    'metadata': json.dumps(agent_metadata)
+                }
+                
+                headers = {
+                    'Authorization': f'Bearer {auth_token}',
+                    'Content-Type': 'application/json'
+                }
+                
+                response = requests.post(dispatch_url, json=dispatch_payload, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    logger.info(f"Successfully dispatched agent to room {attempt_room_name} with metadata")
+                else:
+                    logger.warning(f"Failed to dispatch agent: {response.status_code} - {response.text}")
+            else:
+                logger.warning("LiveKit configuration missing, agent not dispatched")
+                
+        except Exception as dispatch_error:
+            logger.warning(f"Failed to dispatch agent for attempt {next_attempt_number}: {dispatch_error}")
+            # Don't fail the join request if agent dispatch fails
         
         return jsonify({
             'token': token,
@@ -1026,8 +967,6 @@ def get_user_mock_interview_limits():
             response_data['session_limit'] = 0
             response_data['sessions_remaining'] = 0
         
-        logger.info(f"User {user_id[:8]}*** limits: {response_data}")
-        
         return jsonify(response_data), 200
         
     except Exception as e:
@@ -1037,7 +976,7 @@ def get_user_mock_interview_limits():
 @mock_interview_bp.route('/configure', methods=['POST'])
 @require_authentication
 def configure_interview():
-    """Configure interview parameters and get prompt"""
+    """Configure interview parameters (prompt is generated by n8n)"""
     try:
         data = request.get_json()
         interview_type = data.get('interview_type', 'behavioral')
@@ -1045,19 +984,13 @@ def configure_interview():
         position = data.get('position', 'Software Engineer')
         custom_instructions = data.get('custom_instructions', '')
         
-        # Get interview prompt
-        prompt = get_interview_prompt(
-            interview_type=interview_type,
-            difficulty_level=difficulty_level,
-            position=position,
-            custom_instructions=custom_instructions
-        )
-        
+        # Return configuration parameters (prompt is generated by n8n)
         return jsonify({
-            'prompt': prompt,
             'interview_type': interview_type,
             'difficulty_level': difficulty_level,
-            'position': position
+            'position': position,
+            'custom_instructions': custom_instructions,
+            'note': 'Agent prompt is generated by n8n workflow'
         }), 200
         
     except Exception as e:
@@ -1082,8 +1015,6 @@ def get_user_sessions():
             .eq('user_id', g.user.id)\
             .order('created_at', desc=True)\
             .execute()
-        
-        logger.info(f"Found {len(result.data) if result.data else 0} sessions for user {g.user.id[:8]}***")
         
         # Add display status information to each session
         sessions_with_display = []
@@ -1169,9 +1100,22 @@ def end_interview_session(session_id):
 
 @mock_interview_bp.route('/interview-types', methods=['GET'])
 def get_interview_types():
-    """Get available interview types"""
+    """Get suggested interview types (all custom types are allowed)"""
+    suggested_types = {
+        'behavioral': 'Behavioral Interview',
+        'technical': 'Technical Interview', 
+        'system_design': 'System Design Interview',
+        'case_study': 'Case Study Interview',
+        'hr_round': 'HR Round',
+        'panel_interview': 'Panel Interview',
+        'final_round': 'Final Round',
+        'screening': 'Screening Interview'
+    }
+    
     return jsonify({
-        'interview_types': INTERVIEW_TYPES
+        'suggested_types': suggested_types,
+        'note': 'Any custom interview type is allowed - these are just suggestions',
+        'custom_allowed': True
     }), 200
 
 
@@ -1243,16 +1187,21 @@ def interview_completed_webhook():
 def get_user_documents():
     """Get user's documents for interview preparation"""
     try:
-        # Get user documents from the documents table
-        user_client = get_user_client()
-        result = user_client.table('user_documents')\
-            .select('id, document_name, document_type, document_url, created_at')\
+        # Use admin client with explicit user filtering to avoid RLS issues
+        admin_client = get_admin_client()
+        result = admin_client.table('user_documents')\
+            .select('id, uid, document_name, document_type, document_url, created_at')\
             .eq('uid', g.user.id)\
             .order('created_at', desc=True)\
             .execute()
         
+        # Additional security check - ensure all returned documents belong to this user
+        user_documents = [doc for doc in (result.data or []) if doc.get('uid') == g.user.id]
+        
+        logger.info(f"Found {len(user_documents)} documents for user {g.user.id[:8]}***")
+        
         return jsonify({
-            'documents': result.data or []
+            'documents': user_documents
         }), 200
         
     except Exception as e:
@@ -1504,17 +1453,22 @@ def get_resume_content(document_id):
 def get_user_resume_documents():
     """Get user's resume documents specifically"""
     try:
-        # Get user documents filtered for resumes (try multiple possible document_type values)
-        user_client = get_user_client()
-        result = user_client.table('user_documents')\
-            .select('id, document_name, document_type, document_url, created_at')\
+        # Use admin client with explicit user filtering to avoid RLS issues
+        admin_client = get_admin_client()
+        result = admin_client.table('user_documents')\
+            .select('id, uid, document_name, document_type, document_url, created_at')\
             .eq('uid', g.user.id)\
             .in_('document_type', ['resume', 'Resume', 'CV', 'cv'])\
             .order('created_at', desc=True)\
             .execute()
         
+        # Additional security check - ensure all returned documents belong to this user
+        user_resumes = [doc for doc in (result.data or []) if doc.get('uid') == g.user.id]
+        
+        logger.info(f"Found {len(user_resumes)} resume documents for user {g.user.id[:8]}***")
+        
         return jsonify({
-            'resume_documents': result.data or []
+            'resume_documents': user_resumes
         }), 200
         
     except Exception as e:
@@ -1526,17 +1480,22 @@ def get_user_resume_documents():
 def get_user_cover_letter_documents():
     """Get user's cover letter documents specifically"""
     try:
-        # Get user documents filtered for cover letters (try multiple possible document_type values)
-        user_client = get_user_client()
-        result = user_client.table('user_documents')\
-            .select('id, document_name, document_type, document_url, created_at')\
+        # Use admin client with explicit user filtering to avoid RLS issues
+        admin_client = get_admin_client()
+        result = admin_client.table('user_documents')\
+            .select('id, uid, document_name, document_type, document_url, created_at')\
             .eq('uid', g.user.id)\
             .in_('document_type', ['cover_letter', 'Cover Letter', 'coverletter', 'Cover_Letter'])\
             .order('created_at', desc=True)\
             .execute()
         
+        # Additional security check - ensure all returned documents belong to this user
+        user_cover_letters = [doc for doc in (result.data or []) if doc.get('uid') == g.user.id]
+        
+        logger.info(f"Found {len(user_cover_letters)} cover letter documents for user {g.user.id[:8]}***")
+        
         return jsonify({
-            'cover_letter_documents': result.data or []
+            'cover_letter_documents': user_cover_letters
         }), 200
         
     except Exception as e:
@@ -1704,8 +1663,9 @@ def get_attempt_details(attempt_id):
 @mock_interview_bp.route('/attempt/<attempt_id>/save-transcription', methods=['POST'])
 @require_authentication
 def save_attempt_transcription(attempt_id):
-    """Save live transcription data for an active attempt"""
+    """Save live transcription data for an active attempt and mark as completed"""
     try:
+        logger.info(f"save_attempt_transcription called for attempt {attempt_id}")
         data = request.get_json()
         live_transcription = data.get('live_transcription', {})
         
@@ -1714,44 +1674,85 @@ def save_attempt_transcription(attempt_id):
         
         admin_client = get_admin_client()
         
-        # Verify attempt exists and user owns it
+        # Verify attempt exists and user owns it - also get started_at for duration calculation
         attempt_result = admin_client.table('mock_interview_attempts')\
-            .select('id, status, mock_interview!inner(user_id)')\
+            .select('id, status, started_at, mock_interview!inner(user_id)')\
             .eq('id', attempt_id)\
             .execute()
+        
+        logger.info(f"Attempt lookup result for {attempt_id}: found={bool(attempt_result.data)}")
         
         if not attempt_result.data:
             return jsonify({'error': 'Attempt not found'}), 404
         
         attempt = attempt_result.data[0]
+        current_status = attempt.get('status', 'unknown')
+        
+        logger.info(f"Current status for attempt {attempt_id}: {current_status}")
         
         if attempt['mock_interview']['user_id'] != g.user.id:
             return jsonify({'error': 'Access denied'}), 403
         
-        if attempt['status'] not in ['active', 'pending']:
-            return jsonify({'error': 'Cannot update transcription for completed attempt'}), 400
+        if attempt['status'] == 'completed':
+            logger.info(f"Attempt {attempt_id} already completed, skipping update")
+            return jsonify({'error': 'Attempt already completed'}), 400
         
-        # Update live transcription
+        # Calculate actual duration in minutes
+        actual_duration_minutes = 0
+        if attempt.get('started_at'):
+            try:
+                from datetime import datetime
+                logger.info(f"Calculating duration for attempt {attempt_id}: started_at='{attempt.get('started_at')}'")
+                started_at = datetime.fromisoformat(attempt['started_at'].replace('Z', '+00:00'))
+                current_time = datetime.utcnow().replace(tzinfo=started_at.tzinfo)
+                duration_seconds = (current_time - started_at).total_seconds()
+                actual_duration_minutes = max(0, int(duration_seconds / 60))  # Convert to minutes, minimum 0
+                logger.info(f"Duration calculation for attempt {attempt_id}: {duration_seconds} seconds = {actual_duration_minutes} minutes")
+            except Exception as duration_error:
+                logger.warning(f"Error calculating duration for attempt {attempt_id}: {duration_error}")
+                actual_duration_minutes = 0
+        else:
+            logger.warning(f"No started_at timestamp for attempt {attempt_id}, cannot calculate duration")
+        
+        # Update live transcription AND mark as completed with duration
+        update_data = {
+            'live_transcription': json.dumps(live_transcription),
+            'status': 'completed',
+            'completed_at': 'now()',
+            'actual_duration_minutes': actual_duration_minutes,
+            'updated_at': 'now()'
+        }
+        
+        logger.info(f"Updating attempt {attempt_id} with data keys: {list(update_data.keys())}")
+        
         update_result = admin_client.table('mock_interview_attempts')\
-            .update({
-                'live_transcription': json.dumps(live_transcription),
-                'updated_at': 'now()'
-            })\
+            .update(update_data)\
             .eq('id', attempt_id)\
             .execute()
         
+        logger.info(f"Update result for attempt {attempt_id}: success={bool(update_result.data)}, data_length={len(update_result.data) if update_result.data else 0}")
+        
         if update_result.data:
-            logger.info(f"Saved live transcription for attempt {attempt_id}")
+            updated_attempt = update_result.data[0]
+            new_status = updated_attempt.get('status', 'unknown')
+            logger.info(f"Status updated from '{current_status}' to '{new_status}' for attempt {attempt_id}")
+            logger.info(f"Saved live transcription and marked attempt {attempt_id} as completed (duration: {actual_duration_minutes} minutes)")
             return jsonify({
-                'message': 'Live transcription saved successfully',
+                'message': 'Live transcription saved and attempt completed successfully',
                 'attempt_id': attempt_id,
+                'status': 'completed',
+                'actual_duration_minutes': actual_duration_minutes,
                 'transcription_length': len(str(live_transcription))
             }), 200
         else:
+            logger.error(f"Failed to save transcription for attempt {attempt_id} - no data returned from update")
+            logger.error(f"Update data attempted: {update_data}")
             return jsonify({'error': 'Failed to save transcription'}), 500
         
     except Exception as e:
         logger.error(f"Error saving attempt transcription: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return jsonify({'error': 'Internal server error'}), 500
 
 @mock_interview_bp.route('/attempt/<attempt_id>/complete', methods=['POST'])
@@ -1766,9 +1767,9 @@ def complete_attempt(attempt_id):
         
         admin_client = get_admin_client()
         
-        # Verify attempt exists and user owns it
+        # Verify attempt exists and user owns it - also get started_at for duration calculation
         attempt_result = admin_client.table('mock_interview_attempts')\
-            .select('id, status, mock_interview!inner(user_id)')\
+            .select('id, status, started_at, mock_interview!inner(user_id)')\
             .eq('id', attempt_id)\
             .execute()
         
@@ -1780,8 +1781,21 @@ def complete_attempt(attempt_id):
         if attempt['mock_interview']['user_id'] != g.user.id:
             return jsonify({'error': 'Access denied'}), 403
         
-        if attempt['status'] == 'completed':
-            return jsonify({'error': 'Attempt already completed'}), 400
+        if attempt['status'] in ['completed', 'PROCESSED']:
+            return jsonify({'error': f'Attempt already in final state: {attempt["status"]}'}), 400
+        
+        # Calculate actual duration if not provided
+        if actual_duration_minutes <= 0 and attempt.get('started_at'):
+            try:
+                from datetime import datetime
+                started_at = datetime.fromisoformat(attempt['started_at'].replace('Z', '+00:00'))
+                current_time = datetime.utcnow().replace(tzinfo=started_at.tzinfo)
+                duration_seconds = (current_time - started_at).total_seconds()
+                actual_duration_minutes = max(0, int(duration_seconds / 60))  # Convert to minutes, minimum 0
+                logger.info(f"Calculated duration for attempt {attempt_id}: {actual_duration_minutes} minutes")
+            except Exception as duration_error:
+                logger.warning(f"Error calculating duration for attempt {attempt_id}: {duration_error}")
+                actual_duration_minutes = 0
         
         # Update attempt with completion data
         update_data = {
@@ -1812,6 +1826,7 @@ def complete_attempt(attempt_id):
                 'message': 'Attempt completed successfully',
                 'attempt': completed_attempt,
                 'status': 'completed',
+                'actual_duration_minutes': actual_duration_minutes,
                 'processing_message': 'Your interview will be analyzed and feedback will be available soon.'
             }), 200
         else:
@@ -2296,6 +2311,71 @@ def get_cover_letter_content(document_id):
     except Exception as e:
         logger.error(f"Error fetching cover letter content: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+
+@mock_interview_bp.route('/debug/user-documents', methods=['GET'])
+@require_authentication
+def debug_user_documents():
+    """Debug endpoint to verify user document fetching works correctly"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Test all document queries
+        all_docs_result = admin_client.table('user_documents')\
+            .select('id, uid, document_name, document_type, document_url, created_at')\
+            .eq('uid', user_id)\
+            .order('created_at', desc=True)\
+            .execute()
+        
+        resume_docs_result = admin_client.table('user_documents')\
+            .select('id, uid, document_name, document_type, document_url, created_at')\
+            .eq('uid', user_id)\
+            .in_('document_type', ['resume', 'Resume', 'CV', 'cv'])\
+            .order('created_at', desc=True)\
+            .execute()
+        
+        cover_letter_docs_result = admin_client.table('user_documents')\
+            .select('id, uid, document_name, document_type, document_url, created_at')\
+            .eq('uid', user_id)\
+            .in_('document_type', ['cover_letter', 'Cover Letter', 'coverletter', 'Cover_Letter'])\
+            .order('created_at', desc=True)\
+            .execute()
+        
+        debug_data = {
+            'user_id': user_id[:8] + '***',
+            'all_documents': {
+                'count': len(all_docs_result.data or []),
+                'documents': all_docs_result.data or [],
+                'uids_present': [doc.get('uid', 'MISSING') for doc in (all_docs_result.data or [])]
+            },
+            'resume_documents': {
+                'count': len(resume_docs_result.data or []),
+                'documents': resume_docs_result.data or [],
+                'uids_present': [doc.get('uid', 'MISSING') for doc in (resume_docs_result.data or [])]
+            },
+            'cover_letter_documents': {
+                'count': len(cover_letter_docs_result.data or []),
+                'documents': cover_letter_docs_result.data or [],
+                'uids_present': [doc.get('uid', 'MISSING') for doc in (cover_letter_docs_result.data or [])]
+            },
+            'query_info': {
+                'using_admin_client': True,
+                'filtering_by_uid': user_id,
+                'uid_in_select': True
+            }
+        }
+        
+        return jsonify({
+            'debug_data': debug_data,
+            'status': 'success',
+            'message': 'Document queries executed successfully'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in debug user documents: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
 
 @mock_interview_bp.route('/debug/session/<session_id>/content', methods=['GET'])
 @require_authentication
