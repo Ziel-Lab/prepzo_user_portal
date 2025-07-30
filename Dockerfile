@@ -8,6 +8,13 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy only the download script first
+COPY download_models.py .
+
+# Download models during build (requires environment variables at build time)
+# Comment out the next line if you prefer runtime download via entrypoint.sh
+# RUN python download_models.py
+
 COPY . .
 
 
