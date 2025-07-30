@@ -14,6 +14,7 @@ from .extensions import init_supabase
 from .secrets import get_secret
 import re
 from .userPortal.applications.jobListing import job_listing_bp
+from .userPortal.profile import profile_bp
 
 def create_app():
     load_dotenv()
@@ -98,5 +99,6 @@ def create_app():
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
+    app.register_blueprint(profile_bp)
 
     return app
