@@ -19,11 +19,40 @@ def safe_encode_text(text: str) -> str:
     if not text:
         return ""
     try:
-        # Ensure text is properly encoded as UTF-8 and handle any problematic characters
-        return text.encode('utf-8', errors='replace').decode('utf-8')
+        # Convert to string first if it's not already
+        text_str = str(text)
+        
+        # Handle Windows-specific encoding issues
+        # Replace problematic Unicode characters that cause charmap codec errors
+        problematic_chars = {
+            '\u2018': "'",  # Left single quotation mark
+            '\u2019': "'",  # Right single quotation mark  
+            '\u201c': '"',  # Left double quotation mark
+            '\u201d': '"',  # Right double quotation mark
+            '\u2013': '-',  # En dash
+            '\u2014': '-',  # Em dash
+            '\u2026': '...', # Horizontal ellipsis
+            '\u00a0': ' ',  # Non-breaking space
+            '\u0081': '',   # High control character
+            '\u008d': '',   # High control character
+            '\u008f': '',   # High control character
+            '\u0090': '',   # High control character
+            '\u009d': '',   # High control character
+        }
+        
+        # Replace problematic characters
+        for unicode_char, replacement in problematic_chars.items():
+            text_str = text_str.replace(unicode_char, replacement)
+        
+        # Remove any remaining high control characters (0x80-0x9F)
+        text_str = ''.join(char for char in text_str if ord(char) < 0x80 or ord(char) > 0x9F)
+        
+        # Ensure text is properly encoded as UTF-8
+        return text_str.encode('utf-8', errors='replace').decode('utf-8')
+        
     except Exception as e:
         logger.warning(f"Error encoding text: {e}. Using fallback.")
-        # Fallback: remove non-ASCII characters
+        # Fallback: remove all non-ASCII characters
         return ''.join(char if ord(char) < 128 else '?' for char in str(text))
 
 from livekit import agents
@@ -66,6 +95,7 @@ class SimpleMockInterviewAgent(Agent):
         self.attempt_id = attempt_id
         self._session_start_time = datetime.utcnow()
         self._timeout_task = None
+        self._ctx = None  # Will be set in entrypoint
         
         # Use the agent prompt directly
         instructions = safe_encode_text(agent_prompt.strip())
@@ -81,11 +111,6 @@ class SimpleMockInterviewAgent(Agent):
         
         # Start 14-minute timeout as backup
         self._timeout_task = asyncio.create_task(self._timeout_handler())
-        
-        # Generate initial greeting
-        await self.session.generate_reply(
-            instructions=safe_encode_text("Begin the interview with an appropriate greeting and introduction as specified in your instructions.")
-        )
     
     async def on_exit(self) -> None:
         """Called when agent exits the session"""
@@ -102,6 +127,8 @@ class SimpleMockInterviewAgent(Agent):
             await asyncio.sleep(840)
             
             logger.info("14-minute timeout reached - auto-ending interview")
+            # Mark as completed due to timeout
+            await mark_interview_completed(self.attempt_id, "timeout - session duration limit reached")
             await self.end_interview("timeout - session duration limit reached")
             
         except asyncio.CancelledError:
@@ -115,39 +142,62 @@ class SimpleMockInterviewAgent(Agent):
         try:
             logger.info(f"Ending interview with reason: {reason}")
             
-            # Step 1: Quick goodbye message
+            # Step 1: Mark interview as completed in database
+            await mark_interview_completed(self.attempt_id, reason)
+            
+            # Step 2: Quick goodbye message  
             await context.session.generate_reply(
                 instructions=safe_encode_text("Thank you for the interview. The session will end shortly.")
             )
             
-            # Step 2: Wait 1 second for message delivery
+            # Step 3: Wait 1 second for message delivery
             await asyncio.sleep(1)
             
-            # Step 3: Find user participant and call RPC
+            # Step 4: Find THE user participant and call RPC (1 agent + 1 user scenario)
             try:
-                user_participants = [p for p in context.room.remote_participants 
-                                   if not p.identity.startswith('agent')]
+                # Get all remote participants (should be just 1 user in mock interview)
+                all_remote_participants = list(self._ctx.room.remote_participants.values())
+                logger.info(f"Found {len(all_remote_participants)} remote participants in room")
+                
+                # Filter to find the user (non-agent participant)
+                user_participants = [p for p in all_remote_participants 
+                                   if p.kind != "agent" and not p.identity.startswith('agent')]
+                
+                logger.info(f"Found {len(user_participants)} user participants for RPC")
                 
                 if user_participants:
-                    user_identity = user_participants[0].identity
+                    # In 1-agent-1-user scenario, there should be exactly 1 user
+                    user_participant = user_participants[0]
+                    user_identity = user_participant.identity
+                    
+                    logger.info(f"Sending RPC 'forceEndInterview' to user: {user_identity}")
                     
                     # Call frontend RPC method 'forceEndInterview'
-                    await context.room.local_participant.perform_rpc(
-                        destination_identity=user_identity,
-                        method='forceEndInterview',  # Exact frontend method name
-                        payload=json.dumps({
-                            'reason': safe_encode_text(reason),
-                            'timestamp': datetime.utcnow().isoformat()
-                        })
-                    )
-                    logger.info(f"RPC forceEndInterview sent successfully to {user_identity}")
+                    try:
+                        response = await self._ctx.room.local_participant.perform_rpc(
+                            destination_identity=user_identity,
+                            method='forceEndInterview',  # Frontend must register this method
+                            payload=json.dumps({
+                                'reason': safe_encode_text(reason),
+                                'timestamp': datetime.utcnow().isoformat(),
+                                'session_id': self.session_id,
+                                'attempt_id': self.attempt_id
+                            }),
+                            response_timeout=5.0  # 5 second timeout
+                        )
+                        logger.info(f"✅ RPC sent successfully to {user_identity}, response: {response}")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"⏰ RPC timeout - user {user_identity} did not respond within 5 seconds")
+                    except Exception as rpc_call_error:
+                        logger.error(f"❌ RPC call failed: {rpc_call_error}")
+                        # Continue with disconnect even if RPC fails
                 else:
-                    logger.warning("No user participants found for RPC call")
+                    logger.warning("⚠️ No user participants found for RPC call - user may have already left")
             
             except Exception as rpc_error:
-                logger.error(f"Error sending RPC: {rpc_error}")
+                logger.error(f"Error in RPC section: {rpc_error}")
             
-            # Step 4: Always disconnect agent after RPC (or attempt)
+            # Step 5: Always disconnect agent after RPC (or attempt)
             try:
                 # Cancel timeout task since we're ending
                 if self._timeout_task and not self._timeout_task.done():
@@ -156,8 +206,8 @@ class SimpleMockInterviewAgent(Agent):
                 # Give frontend a moment to process RPC
                 await asyncio.sleep(2)
                 
-                # Disconnect the agent from the room
-                await context.room.disconnect()
+                # Disconnect the agent from the room (using stored JobContext)
+                await self._ctx.room.disconnect()
                 logger.info("Agent disconnected from room successfully")
                 
             except Exception as disconnect_error:
@@ -172,10 +222,12 @@ class SimpleMockInterviewAgent(Agent):
         
         except Exception as e:
             logger.error(f"Error ending interview: {e}")
-            # Fallback: force disconnect
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            # Fallback: force disconnect (using stored JobContext)
             try:
-                if hasattr(context, 'room'):
-                    await context.room.disconnect()
+                if self._ctx and hasattr(self._ctx, 'room'):
+                    await self._ctx.room.disconnect()
                 elif hasattr(context, 'session') and hasattr(context.session, 'close'):
                     await context.session.close()
                 logger.info("Fallback disconnect successful")
@@ -259,14 +311,14 @@ async def get_agent_prompt_from_db(room_name: str) -> tuple[Optional[str], Optio
 
 
 async def save_live_transcription(attempt_id: str, speaker_type: str, speaker_name: str, content: str):
-    """Save message directly to live transcription in mock_interview_attempts table and mark as completed"""
+    """Save message directly to live transcription in mock_interview_attempts table WITHOUT changing status"""
     try:
         from ...extensions import get_admin_client
         admin_client = get_admin_client()
         
-        # Get current live transcription, status, and started_at for duration calculation
+        # Get current live transcription and status
         response = admin_client.table('mock_interview_attempts')\
-            .select('live_transcription, status, started_at')\
+            .select('live_transcription, status')\
             .eq('id', attempt_id)\
             .execute()
         
@@ -277,7 +329,6 @@ async def save_live_transcription(attempt_id: str, speaker_type: str, speaker_na
         attempt_data = response.data[0]
         current_transcription = attempt_data.get('live_transcription') or {"conversation": []}
         current_status = attempt_data.get('status', 'pending')
-        started_at = attempt_data.get('started_at')
         
         logger.info(f"Current status for attempt {attempt_id}: {current_status}")
         
@@ -293,59 +344,98 @@ async def save_live_transcription(attempt_id: str, speaker_type: str, speaker_na
         
         current_transcription["conversation"].append(conversation_entry)
         
-        # Update the attempt with new live transcription AND mark as completed
+        # Update ONLY the transcription, do NOT change status here
+        # Status should only be changed by the end_interview function
         update_data = {
             'live_transcription': current_transcription,
             'updated_at': 'now()'
         }
         
-        # Only update status if not already in final state (completed or PROCESSED)
-        if current_status not in ['completed', 'PROCESSED']:
-            # Calculate actual duration in minutes
-            actual_duration_minutes = 0
-            if started_at:
-                try:
-                    logger.info(f"Calculating duration for attempt {attempt_id}: started_at='{started_at}'")
-                    started_at_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-                    current_time = datetime.utcnow().replace(tzinfo=started_at_dt.tzinfo)
-                    duration_seconds = (current_time - started_at_dt).total_seconds()
-                    actual_duration_minutes = max(0, int(duration_seconds / 60))  # Convert to minutes, minimum 0
-                    logger.info(f"Duration calculation for attempt {attempt_id}: {duration_seconds} seconds = {actual_duration_minutes} minutes")
-                except Exception as duration_error:
-                    logger.warning(f"Error calculating duration for attempt {attempt_id}: {duration_error}")
-                    actual_duration_minutes = 0
-            else:
-                logger.warning(f"No started_at timestamp for attempt {attempt_id}, cannot calculate duration")
-            
-            update_data['status'] = 'completed'
-            update_data['completed_at'] = 'now()'
-            update_data['actual_duration_minutes'] = actual_duration_minutes
-            logger.info(f"Marking attempt {attempt_id} as completed with live transcription (duration: {actual_duration_minutes} minutes)")
-        else:
-            logger.info(f"Attempt {attempt_id} already in final state ({current_status}), only updating transcription")
-        
-        logger.info(f"Updating attempt {attempt_id} with data: {list(update_data.keys())}")
+        logger.info(f"Updating attempt {attempt_id} with live transcription only (status remains: {current_status})")
         
         update_response = admin_client.table('mock_interview_attempts')\
             .update(update_data)\
             .eq('id', attempt_id)\
             .execute()
         
-        logger.info(f"Update response for attempt {attempt_id}: success={bool(update_response.data)}, data_length={len(update_response.data) if update_response.data else 0}")
-        
         if update_response.data:
-            updated_attempt = update_response.data[0]
-            new_status = updated_attempt.get('status', 'unknown')
-            status_msg = "and marked as completed" if current_status != 'completed' else ""
-            duration_msg = f" (duration: {update_data.get('actual_duration_minutes', 'unknown')} minutes)" if current_status != 'completed' else ""
-            logger.info(f"Saved live transcription for attempt {attempt_id} {status_msg}{duration_msg}: {speaker_type} - {content[:50]}...")
-            logger.info(f"Status updated from '{current_status}' to '{new_status}' for attempt {attempt_id}")
+            logger.info(f"Saved live transcription for attempt {attempt_id}: {speaker_type} - {content[:50]}...")
         else:
             logger.error(f"Failed to update live transcription for attempt {attempt_id} - no data returned from update")
             logger.error(f"Update data attempted: {update_data}")
             
     except Exception as e:
         logger.error(f"Error saving live transcription: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+
+
+async def mark_interview_completed(attempt_id: str, reason: str = "Interview completed"):
+    """Mark the interview attempt as completed with proper status and duration calculation"""
+    try:
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
+        
+        # Get current attempt data including started_at for duration calculation
+        response = admin_client.table('mock_interview_attempts')\
+            .select('status, started_at')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not response.data:
+            logger.warning(f"No attempt found with id {attempt_id}")
+            return
+        
+        attempt_data = response.data[0]
+        current_status = attempt_data.get('status', 'pending')
+        started_at = attempt_data.get('started_at')
+        
+        logger.info(f"Marking interview attempt {attempt_id} as completed. Current status: {current_status}")
+        
+        # Only update status if not already in final state
+        if current_status in ['completed', 'PROCESSED']:
+            logger.info(f"Attempt {attempt_id} already in final state ({current_status}), skipping completion")
+            return
+        
+        # Calculate actual duration in minutes
+        actual_duration_minutes = 0
+        if started_at:
+            try:
+                from datetime import datetime
+                logger.info(f"Calculating duration for attempt {attempt_id}: started_at='{started_at}'")
+                started_at_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                current_time = datetime.utcnow().replace(tzinfo=started_at_dt.tzinfo)
+                duration_seconds = (current_time - started_at_dt).total_seconds()
+                actual_duration_minutes = max(0, int(duration_seconds / 60))  # Convert to minutes, minimum 0
+                logger.info(f"Duration calculation for attempt {attempt_id}: {duration_seconds} seconds = {actual_duration_minutes} minutes")
+            except Exception as duration_error:
+                logger.warning(f"Error calculating duration for attempt {attempt_id}: {duration_error}")
+                actual_duration_minutes = 0
+        else:
+            logger.warning(f"No started_at timestamp for attempt {attempt_id}, cannot calculate duration")
+        
+        # Update status to completed
+        update_data = {
+            'status': 'completed',
+            'completed_at': 'now()',
+            'actual_duration_minutes': actual_duration_minutes,
+            'updated_at': 'now()'
+        }
+        
+        logger.info(f"Marking attempt {attempt_id} as completed (duration: {actual_duration_minutes} minutes, reason: {reason})")
+        
+        update_response = admin_client.table('mock_interview_attempts')\
+            .update(update_data)\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if update_response.data:
+            logger.info(f"Successfully marked attempt {attempt_id} as completed")
+        else:
+            logger.error(f"Failed to mark attempt {attempt_id} as completed - no data returned from update")
+            
+    except Exception as e:
+        logger.error(f"Error marking interview completed: {e}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
 
@@ -367,6 +457,8 @@ async def entrypoint(ctx: JobContext):
     # Create the simplified agent
     try:
         assistant = SimpleMockInterviewAgent(agent_prompt, session_id, attempt_id)
+        # Store JobContext for RPC calls (following official example pattern)
+        assistant._ctx = ctx
     except Exception as e:
         logger.error(f"Failed to create simple agent: {e}")
         return
@@ -483,7 +575,8 @@ def main():
             logger.info("Creating WorkerOptions...")
             worker_options = agents.WorkerOptions(
                 entrypoint_fnc=entrypoint,
-                port=8081  # Debug port
+                port=8081,  # Debug port
+                # No agent_name = automatic dispatch enabled (1 agent per room)
             )
             logger.info("Starting Simple LiveKit agent worker...")
             agents.cli.run_app(worker_options)

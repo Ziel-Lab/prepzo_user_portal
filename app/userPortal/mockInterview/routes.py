@@ -745,78 +745,9 @@ def join_interview_session(session_id):
             'color_class': display_info['color_class']
         }
         
-        # CRITICAL FIX: Dispatch agent with metadata for subsequent attempts
-        # This ensures the agent can connect to attempt 2, 3, etc.
-        try:
-            user_display_name = session.get('display_name') or get_user_display_name(g.user)
-            
-            # Prepare metadata for the agent (same as start-agent endpoint)
-            agent_metadata = {
-                'session_id': session_id,
-                'user_id': str(g.user.id),
-                'user_display_name': user_display_name,
-                'interview_type': session.get('interview_type', 'behavioral'),
-                'position': session.get('position', 'Software Engineer'),
-                'company_name': session.get('company_name', 'Company'),
-                'difficulty_level': session.get('difficulty_level', 'mid')
-            }
-            
-            # Dispatch agent to the attempt room
-            import requests
-            import jwt
-            import time
-            
-            livekit_api_key = current_app.config.get('LIVEKIT_API_KEY')
-            livekit_api_secret = current_app.config.get('LIVEKIT_API_SECRET')
-            livekit_url = current_app.config.get('LIVEKIT_URL')
-            
-            if all([livekit_api_key, livekit_api_secret, livekit_url]):
-                # Create JWT token for authentication
-                now = int(time.time())
-                token_payload = {
-                    'iss': livekit_api_key,
-                    'exp': now + 600,  # 10 minutes
-                    'nbf': now,
-                    'video': {
-                        'room': attempt_room_name,
-                        'roomJoin': True,
-                        'roomAdmin': True
-                    }
-                }
-                
-                auth_token = jwt.encode(token_payload, livekit_api_secret, algorithm='HS256')
-                
-                # Convert WebSocket URL to HTTP
-                api_url = livekit_url.replace('ws://', 'http://').replace('wss://', 'https://')
-                if api_url.endswith('/'):
-                    api_url = api_url[:-1]
-                
-                # Dispatch agent via HTTP API
-                dispatch_url = f"{api_url}/twirp/livekit.AgentDispatchService/CreateDispatch"
-                
-                agent_name = "mock_interview_agent"
-                dispatch_payload = {
-                    'agent_name': agent_name,
-                    'room': attempt_room_name,
-                    'metadata': json.dumps(agent_metadata)
-                }
-                
-                headers = {
-                    'Authorization': f'Bearer {auth_token}',
-                    'Content-Type': 'application/json'
-                }
-                
-                response = requests.post(dispatch_url, json=dispatch_payload, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    logger.info(f"Successfully dispatched agent to room {attempt_room_name} with metadata")
-                else:
-                    logger.warning(f"Failed to dispatch agent: {response.status_code} - {response.text}")
-            else:
-                logger.warning("LiveKit configuration missing, agent not dispatched")
-                
-        except Exception as dispatch_error:
-            logger.warning(f"Failed to dispatch agent for attempt {next_attempt_number}: {dispatch_error}")
-            # Don't fail the join request if agent dispatch fails
+        # NO AGENT DISPATCH - Let LiveKit handle this automatically
+        # Agents will be auto-dispatched by LiveKit when users join rooms
+        logger.info(f"Room {attempt_room_name} created - agent will auto-join via LiveKit")
         
         return jsonify({
             'token': token,
@@ -1296,137 +1227,13 @@ def get_swot_analysis(session_id):
 @mock_interview_bp.route('/session/<session_id>/start-agent', methods=['POST'])
 @require_authentication
 def start_interview_agent(session_id):
-    """Dispatch LiveKit agent to interview session using explicit dispatch"""
-    try:
-        # Get session data using admin client
-        try:
-            admin_client = get_admin_client()
-        except RuntimeError as e:
-            logger.error(f"Admin client not available: {e}")
-            return jsonify({'error': 'Server configuration error'}), 500
-            
-        result = admin_client.table('mock_interview')\
-            .select('*')\
-            .eq('id', session_id)\
-            .eq('user_id', g.user.id)\
-            .execute()
-        
-        if not result.data:
-            return jsonify({'error': 'Session not found'}), 404
-        
-        session = result.data[0]
-        
-        if session.get('status') != 'active':
-            return jsonify({'error': 'Session must be active to start agent'}), 400
-        
-        # Get user display name for agent metadata
-        user_display_name = session.get('display_name') or get_user_display_name(g.user)
-        
-        # Prepare metadata for the agent (following LiveKit documentation)
-        agent_metadata = {
-            'session_id': session_id,
-            'user_id': str(g.user.id),
-            'user_display_name': user_display_name,  # Include user's full name
-            'interview_type': session.get('interview_type', 'behavioral'),
-            'position': session.get('position', 'Software Engineer'),
-            'company_name': session.get('company_name', 'Company'),
-            'difficulty_level': session.get('difficulty_level', 'mid')
-        }
-        
-        # Dispatch agent using LiveKit Agent Dispatch Service (explicit dispatch)
-        room_name = session['room_name']
-        agent_name = "mock_interview_agent"
-        
-        try:
-            # Use HTTP API instead of async Python SDK to avoid event loop issues in Flask
-            import requests
-            import jwt
-            import time
-            
-            livekit_api_key = current_app.config.get('LIVEKIT_API_KEY')
-            livekit_api_secret = current_app.config.get('LIVEKIT_API_SECRET')
-            livekit_url = current_app.config.get('LIVEKIT_URL')
-            
-            if not all([livekit_api_key, livekit_api_secret, livekit_url]):
-                logger.error("Missing LiveKit configuration for agent dispatch")
-                return jsonify({'error': 'LiveKit configuration missing'}), 500
-            
-            # Create JWT token for authentication
-            now = int(time.time())
-            token_payload = {
-                'iss': livekit_api_key,
-                'exp': now + 600,  # 10 minutes
-                'nbf': now,
-                'video': {
-                    'room': room_name,
-                    'roomJoin': True,
-                    'roomAdmin': True
-                }
-            }
-            
-            token = jwt.encode(token_payload, livekit_api_secret, algorithm='HS256')
-            
-            # Convert WebSocket URL to HTTP
-            api_url = livekit_url.replace('ws://', 'http://').replace('wss://', 'https://')
-            if api_url.endswith('/'):
-                api_url = api_url[:-1]
-            
-            # Dispatch agent via HTTP API
-            dispatch_url = f"{api_url}/twirp/livekit.AgentDispatchService/CreateDispatch"
-            
-            dispatch_payload = {
-                'agent_name': agent_name,
-                'room': room_name,
-                'metadata': json.dumps(agent_metadata)
-            }
-            
-            headers = {
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json'
-            }
-            
-            response = requests.post(
-                dispatch_url,
-                json=dispatch_payload,
-                headers=headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                dispatch_result = response.json()
-                dispatch_id = dispatch_result.get('id', 'unknown')
-                logger.info(f"Agent dispatched successfully for session {session_id}, dispatch ID: {dispatch_id}")
-            else:
-                logger.error(f"Agent dispatch failed: {response.status_code} - {response.text}")
-                return jsonify({'error': f'Agent dispatch failed: {response.status_code}'}), 500
-            
-        except Exception as dispatch_error:
-            logger.error(f"Failed to dispatch agent: {dispatch_error}")
-            return jsonify({'error': 'Failed to dispatch interview agent'}), 500
-        
-        # Update session status to indicate agent is being dispatched
-        admin_client.table('mock_interview')\
-            .update({
-                'status': 'agent_dispatched', 
-                'updated_at': 'now()'
-            })\
-            .eq('id', session_id)\
-            .execute()
-        
-        logger.info(f"Agent dispatched to room {room_name} for session {session_id}")
-        
-        return jsonify({
-            'status': 'agent_dispatched',
-            'session_id': session_id,
-            'room_name': room_name,
-            'agent_name': agent_name,
-            'dispatch_id': dispatch_id,
-            'message': 'Interview agent has been dispatched and will join shortly.'
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error dispatching interview agent: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
+    """DISABLED: Agent dispatch is handled in join route only."""
+    
+    return jsonify({
+        'status': 'disabled',
+        'message': 'This endpoint is disabled. Agent dispatch happens automatically in join route.',
+        'session_id': session_id
+    }), 410  # 410 Gone - resource is no longer available
 
 @mock_interview_bp.route('/document/<int:document_id>/resume-content', methods=['GET'])
 @require_authentication
