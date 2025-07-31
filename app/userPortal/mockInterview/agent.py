@@ -119,6 +119,53 @@ class SimpleMockInterviewAgent(Agent):
         # Cancel timeout task
         if self._timeout_task and not self._timeout_task.done():
             self._timeout_task.cancel()
+        
+        # BACKUP: If agent is exiting without calling end_interview, call it now
+        # This prevents stuck sessions when agent disconnects naturally
+        try:
+            # Check if interview was already marked as completed
+            from ...extensions import get_admin_client
+            admin_client = get_admin_client()
+            
+            # Retry logic for database query
+            max_retries = 3
+            retry_delay = 1
+            
+            for attempt in range(max_retries):
+                try:
+                    response = admin_client.table('mock_interview_attempts')\
+                        .select('status')\
+                        .eq('id', self.attempt_id)\
+                        .execute()
+                    break  # Success, exit retry loop
+                except Exception as db_error:
+                    if attempt < max_retries - 1:  # Not the last attempt
+                        logger.warning(f"Database status check attempt {attempt + 1} failed: {str(db_error)[:100]}... Retrying in {retry_delay}s")
+                        import time
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        # Last attempt failed, re-raise the error
+                        logger.error(f"All {max_retries} database status check attempts failed for attempt {self.attempt_id}")
+                        raise db_error
+            
+            if response.data:
+                current_status = response.data[0].get('status', 'pending')
+                logger.info(f"Agent exiting - current attempt status: {current_status}")
+                
+                if current_status not in ['completed', 'PROCESSED']:
+                    logger.warning(f"⚠️  Agent exiting but interview not completed! Status: {current_status}")
+                    logger.warning(f"⚠️  This indicates the interview was not properly ended by calling end_interview()")
+                    logger.warning(f"⚠️  Interview will remain in '{current_status}' status - manual intervention may be needed")
+                    # DO NOT auto-complete here - agent should have called end_interview() if interview was truly complete
+                else:
+                    logger.info("✅ Interview already completed, clean exit")
+            else:
+                logger.warning(f"Could not find attempt {self.attempt_id} during exit")
+                
+        except Exception as exit_completion_error:
+            logger.error(f"Error during exit completion check: {exit_completion_error}")
+            # Continue with normal exit
     
     async def _timeout_handler(self) -> None:
         """14-minute timeout backup to prevent stuck sessions"""
@@ -173,23 +220,30 @@ class SimpleMockInterviewAgent(Agent):
                     logger.info(f"Sending RPC 'forceEndInterview' to user: {user_identity}")
                     
                     # Call frontend RPC method 'forceEndInterview'
+                    rpc_payload = {
+                        'reason': safe_encode_text(reason),
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'session_id': self.session_id,
+                        'attempt_id': self.attempt_id
+                    }
+                    logger.info(f"📤 Sending RPC to {user_identity} with payload: {rpc_payload}")
+                    
                     try:
                         response = await self._ctx.room.local_participant.perform_rpc(
                             destination_identity=user_identity,
                             method='forceEndInterview',  # Frontend must register this method
-                            payload=json.dumps({
-                                'reason': safe_encode_text(reason),
-                                'timestamp': datetime.utcnow().isoformat(),
-                                'session_id': self.session_id,
-                                'attempt_id': self.attempt_id
-                            }),
-                            response_timeout=5.0  # 5 second timeout
+                            payload=json.dumps(rpc_payload),
+                            response_timeout=10.0  # Increased to 10 seconds
                         )
                         logger.info(f"✅ RPC sent successfully to {user_identity}, response: {response}")
                     except asyncio.TimeoutError:
-                        logger.warning(f"⏰ RPC timeout - user {user_identity} did not respond within 5 seconds")
+                        logger.error(f"⏰ RPC TIMEOUT - user {user_identity} did not respond within 10 seconds")
+                        logger.error(f"This means frontend likely didn't register 'forceEndInterview' RPC method")
+                        logger.error(f"🔧 WORKAROUND: Will still disconnect agent to prevent stuck session")
                     except Exception as rpc_call_error:
                         logger.error(f"❌ RPC call failed: {rpc_call_error}")
+                        logger.error(f"Check if frontend properly registered RPC handler before room.connect()")
+                        logger.error(f"🔧 WORKAROUND: Will still disconnect agent to prevent stuck session")
                         # Continue with disconnect even if RPC fails
                 else:
                     logger.warning("⚠️ No user participants found for RPC call - user may have already left")
