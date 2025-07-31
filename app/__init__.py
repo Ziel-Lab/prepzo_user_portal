@@ -20,6 +20,9 @@ def create_app():
     load_dotenv()
     app = Flask(__name__)
 
+    # Reject extremely large request bodies early (e.g. huge file uploads)
+    app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB
+
     secret_name = "userPortal"
     region_name = "us-east-1"
     secrets = get_secret(secret_name, region_name)
