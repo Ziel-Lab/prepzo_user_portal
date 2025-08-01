@@ -116,4 +116,14 @@ def create_app():
     app.register_blueprint(profile_bp)
     app.register_blueprint(mock_interview_bp)
 
+    # Fallback route for auth hook without /auth prefix (compatibility)
+    @app.route('/custom-access-token-hook', methods=['POST'])
+    def custom_access_token_hook_fallback():
+        """
+        Fallback route for custom access token hook without /auth prefix
+        Routes to the auth blueprint implementation
+        """
+        from .auth.routes import custom_access_token_hook
+        return custom_access_token_hook()
+
     return app
