@@ -8,11 +8,8 @@ import uuid
 # Supabase storage bucket used for user-uploaded resumes
 SUPABASE_BUCKET = "user-documents"
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-<<<<<<< HEAD
-=======
 # Maximum allowed avatar image size (in bytes)
 MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB limit for avatar files
->>>>>>> b4bce718ab2f92870cb357ba055f56bfd64ff539
 
 def allowed_image_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
@@ -155,14 +152,11 @@ def upload_avatar():
             return jsonify({'error': 'Supabase client not initialized'}), 500
 
         file_bytes = file.read()
-<<<<<<< HEAD
-=======
 
         # Enforce file size limit before proceeding
         if len(file_bytes) > MAX_AVATAR_SIZE_BYTES:
             return jsonify({'error': f'Avatar file exceeds the {MAX_AVATAR_SIZE_BYTES // (1024 * 1024)} MB limit'}), 413
 
->>>>>>> b4bce718ab2f92870cb357ba055f56bfd64ff539
         user_id = str(g.user.id)
         file_extension = file.filename.rsplit('.', 1)[1].lower()
         unique_file_name = f"avatar_{user_id}.{file_extension}"
@@ -342,3 +336,4 @@ def edit_public_slug():
 
     except Exception as e:
         current_app.logger.error(f'Failed to edit public slug: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to edit slug', 'details': str(e)}), 500

@@ -29,6 +29,9 @@ def create_app():
     if secrets:
         for key, value in secrets.items():
             app.config[key] = value
+        app.logger.info("Configuration loaded from AWS Secrets Manager")
+    else:
+        app.logger.error("FATAL: Could not load configuration from AWS Secrets Manager")
     
      # Centralized CORS Configuration - Now handled by custom middleware
     CORS(app,
@@ -104,5 +107,6 @@ def create_app():
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
     app.register_blueprint(profile_bp)
+    app.register_blueprint(mock_interview_bp)
 
     return app
