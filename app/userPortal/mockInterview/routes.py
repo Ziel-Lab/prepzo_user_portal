@@ -239,8 +239,7 @@ def create_interview_session():
             default_usage = {
                 'user_id': user_id,
                 'plan_id': 1,  # Default to free plan
-                'mock_interview_session_lifetime_count': 0,
-                'mock_interview_attempt_lifetime_count': 0
+                'mock_interview_session_lifetime_count': 0
             }
             admin_client.table('feature_usage').insert(default_usage).execute()
             usage_data = default_usage
@@ -713,22 +712,7 @@ def join_interview_session(session_id):
         else:
             logger.error(f"Failed to set started_at for attempt {attempt_result.data[0]['id']}")
         
-        # Update attempt counter in feature_usage
-        try:
-            # First get current count
-            usage_result = admin_client.table('feature_usage')\
-                .select('mock_interview_attempt_lifetime_count')\
-                .eq('user_id', g.user.id)\
-                .execute()
-            
-            if usage_result.data:
-                current_attempts = usage_result.data[0].get('mock_interview_attempt_lifetime_count', 0)
-                admin_client.table('feature_usage')\
-                    .update({'mock_interview_attempt_lifetime_count': current_attempts + 1})\
-                    .eq('user_id', g.user.id)\
-                    .execute()
-        except Exception as counter_error:
-            logger.warning(f"Failed to update attempt counter: {counter_error}")
+        # Note: Attempt counter tracking removed since column doesn't exist in database
         
         # Update session object with new status and compute display status
         session['status'] = 'active'
@@ -835,7 +819,7 @@ def get_user_mock_interview_limits():
         
         # Get user's current plan and usage from feature_usage table
         usage_result = admin_client.table('feature_usage')\
-            .select('plan_id, mock_interview_session_lifetime_count, mock_interview_attempt_lifetime_count')\
+            .select('plan_id, mock_interview_session_lifetime_count')\
             .eq('user_id', user_id)\
             .execute()
         
@@ -844,8 +828,7 @@ def get_user_mock_interview_limits():
             default_usage = {
                 'user_id': user_id,
                 'plan_id': 1,  # Default to free plan
-                'mock_interview_session_lifetime_count': 0,
-                'mock_interview_attempt_lifetime_count': 0
+                'mock_interview_session_lifetime_count': 0
             }
             admin_client.table('feature_usage').insert(default_usage).execute()
             usage_data = default_usage
