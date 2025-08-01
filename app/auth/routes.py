@@ -207,19 +207,19 @@ def custom_access_token_hook():
         if not event:
             return jsonify({"error": "Empty JSON payload"}), 400
         
-        # Extract and validate user information
-        user = event.get('user', {})
-        user_id = user.get('id')
-        user_email = user.get('email')
-        user_metadata = user.get('user_metadata', {})
-        user_created_at = user.get('created_at')
+        # Extract and validate user information from Supabase Custom Access Token Hook payload
+        user_id = event.get('user_id')
+        claims = event.get('claims', {})
+        user_email = claims.get('email')
+        user_metadata = claims.get('user_metadata', {})
+        user_created_at = claims.get('created_at') or claims.get('iat')
         
         if not user_id:
             current_app.logger.warning("Missing user ID in webhook payload")
             return jsonify({"error": "Missing user ID"}), 400
         
         # Initialize custom claims with production values
-        custom_claims = {
+        new_custom_claims = {
             'user_id': user_id,
             'email': user_email,
             'token_version': 'v2.1',
@@ -237,7 +237,7 @@ def custom_access_token_hook():
         )
         # Sanitize display name (basic)
         display_name = ''.join(c for c in display_name if c.isprintable())[:50]
-        custom_claims['display_name'] = display_name
+        new_custom_claims['display_name'] = display_name
         
         # Get subscription plan with timeout protection
         try:
@@ -251,29 +251,29 @@ def custom_access_token_hook():
                 .execute()
             
             if sub_result.data:
-                custom_claims['subscription_plan_id'] = sub_result.data['plan_id']
-                custom_claims['subscription_status'] = sub_result.data.get('status', 'active')
+                new_custom_claims['subscription_plan_id'] = sub_result.data['plan_id']
+                new_custom_claims['subscription_status'] = sub_result.data.get('status', 'active')
             else:
-                custom_claims['subscription_plan_id'] = 1  # Default to Free plan
-                custom_claims['subscription_status'] = 'active'
+                new_custom_claims['subscription_plan_id'] = 1  # Default to Free plan
+                new_custom_claims['subscription_status'] = 'active'
                 
         except Exception as e:
             current_app.logger.warning(f"Subscription lookup failed for user {user_id[:8]}***: {e}")
-            custom_claims['subscription_plan_id'] = 1  # Default to Free plan
-            custom_claims['subscription_status'] = 'active'
+            new_custom_claims['subscription_plan_id'] = 1  # Default to Free plan
+            new_custom_claims['subscription_status'] = 'active'
         
         # Add user account metadata
         if user_created_at:
             try:
                 created_timestamp = datetime.fromisoformat(user_created_at.replace('Z', '+00:00')).timestamp()
-                custom_claims['account_created_at'] = int(created_timestamp)
+                new_custom_claims['account_created_at'] = int(created_timestamp)
             except Exception:
                 pass
         
         # Merge custom claims into existing claims (preserve existing)
         existing_claims = event.get('claims', {})
         # Only update our custom claims, preserve any existing ones
-        for key, value in custom_claims.items():
+        for key, value in new_custom_claims.items():
             existing_claims[key] = value
         
         # Update the event
