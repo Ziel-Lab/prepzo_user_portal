@@ -261,18 +261,38 @@ def create_interview_session():
         
         if plan_result.data:
             session_limit = plan_result.data[0].get('mock_interview_session', 0)
-            
-            # Check if user has reached their limit
-            if session_limit is not None and session_limit > 0 and current_sessions >= session_limit:
+        else:
+            # Exact limits for each plan_id if plan not found in database
+            if plan_id == 1:
+                session_limit = 0  # Free plan: 0 sessions
+            elif plan_id == 2:
+                session_limit = 3  # Pro plan: 3 sessions
+            elif plan_id == 3:
+                session_limit = 999999999  # Premium plan: unlimited sessions
+            else:
+                session_limit = 0  # Unknown plan: no sessions
+        
+        # Check if plan has unlimited sessions (only >1000 sessions counts as unlimited)
+        is_unlimited = session_limit is not None and session_limit > 1000
+        
+        # No special handling - use exact database values for all plans
+        
+        # Check if user has reached their limit or plan doesn't allow sessions
+        if not is_unlimited:
+            if session_limit <= 0:
+                return jsonify({
+                    'error': 'Your current plan does not include mock interview sessions. Please upgrade your plan.',
+                    'limit_reached': True,
+                    'current_count': current_sessions,
+                    'limit': session_limit
+                }), 403
+            elif current_sessions >= session_limit:
                 return jsonify({
                     'error': f'You have reached your session limit ({current_sessions}/{session_limit}). Please upgrade your plan.',
                     'limit_reached': True,
                     'current_count': current_sessions,
                     'limit': session_limit
                 }), 403
-        else:
-            # Default limits if plan not found
-            session_limit = 0
         
         # Basic interview parameters - extract from request data
         interview_type = data.get('type') or data.get('interview_type', 'behavioral')
@@ -821,6 +841,7 @@ def get_session_data(session_id):
         logger.error(f"Error fetching session data: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
+
 @mock_interview_bp.route('/user-limits', methods=['GET'])
 @require_authentication
 def get_user_mock_interview_limits():
@@ -858,7 +879,15 @@ def get_user_mock_interview_limits():
         
         if not plan_result.data:
             logger.warning(f"No subscription plan found for plan_id {plan_id}")
-            plan_limits = {'mock_interview_session': 0, 'mock_interview_attempts': 3}
+            # Exact limits for each plan_id if plan not found in database
+            if plan_id == 1:
+                plan_limits = {'mock_interview_session': 0, 'mock_interview_attempts': 0}  # Free plan
+            elif plan_id == 2:
+                plan_limits = {'mock_interview_session': 3, 'mock_interview_attempts': 3}  # Pro plan
+            elif plan_id == 3:
+                plan_limits = {'mock_interview_session': 999999999, 'mock_interview_attempts': 3}  # Premium plan
+            else:
+                plan_limits = {'mock_interview_session': 0, 'mock_interview_attempts': 0}  # Unknown plan
         else:
             plan_limits = plan_result.data[0]
         
@@ -870,27 +899,30 @@ def get_user_mock_interview_limits():
         
         current_sessions = len(sessions_result.data) if sessions_result.data else 0
         
+        # Determine if plan has unlimited sessions (only >1000 sessions counts as unlimited)
+        session_limit = plan_limits.get('mock_interview_session', 0)
+        is_unlimited = session_limit is not None and session_limit > 1000
+        
         # Prepare response
         response_data = {
             'plan_id': plan_id,
-            'session_limit': plan_limits.get('mock_interview_session', 0),
+            'session_limit': session_limit if not is_unlimited else None,
             'sessions_used': current_sessions,
-            'sessions_remaining': max(0, (plan_limits.get('mock_interview_session', 0) or 999999) - current_sessions),
+            'sessions_remaining': 999999999 if is_unlimited else max(0, session_limit - current_sessions),
             'attempts_per_session': plan_limits.get('mock_interview_attempts', 3),
-            'is_unlimited_sessions': plan_limits.get('mock_interview_session') is None or plan_limits.get('mock_interview_session') == 0,
-            'can_create_session': (
-                plan_limits.get('mock_interview_session') is None or  # Unlimited
-                plan_limits.get('mock_interview_session') == 0 or     # Free plan (no sessions)
-                current_sessions < plan_limits.get('mock_interview_session', 0)
-            ),
+            'is_unlimited_sessions': is_unlimited,
+            'can_create_session': False,  # Will be set correctly below based on limits
             'plan_name': 'Free' if plan_id == 1 else ('Pro' if plan_id == 2 else 'Premium')
         }
         
-        # Special handling for free plan (plan_id 1)
-        if plan_id == 1:
+        # Use exact database values for all plans - no special overrides
+        if not is_unlimited and session_limit > 0:
+            response_data['can_create_session'] = current_sessions < session_limit
+        elif is_unlimited:
+            response_data['can_create_session'] = True
+        else:
+            # session_limit is 0 or None - no sessions allowed
             response_data['can_create_session'] = False
-            response_data['session_limit'] = 0
-            response_data['sessions_remaining'] = 0
         
         return jsonify(response_data), 200
         
