@@ -73,31 +73,60 @@ jobs:
             # Check if previous tag file exists
             if [ -f ~/previous_image_tag.txt ]; then
               PREVIOUS_IMAGE_TAG=$(cat ~/previous_image_tag.txt)
+              echo "Previous image tag found: $PREVIOUS_IMAGE_TAG"
             else
               PREVIOUS_IMAGE_TAG=""
+              echo "No previous image tag found"
             fi
 
             # Deploy new container
+            echo "Pulling new image..."
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            
+            echo "Stopping existing container..."
             docker stop $CONTAINER_NAME || true
             docker rm $CONTAINER_NAME || true
+            
+            echo "Starting new container..."
             docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
             
-            # Health-check & rollback
-            sleep 5 
-            if curl -f http://localhost:$PORT/health; then
-              echo "$IMAGE_TAG" > ~/previous_image_tag.txt
-              echo "Deployment successful."
-            else
-              echo "Health check failed. Rolling back..."
-              docker stop $CONTAINER_NAME || true
-              docker rm   $CONTAINER_NAME || true
-              if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
-                docker run -d --restart always \
-                  -p 127.0.0.1:$PORT:$PORT \
-                  --name $CONTAINER_NAME \
-                  $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
+            # Wait for container to start
+            echo "Waiting for container to start..."
+            sleep 10
+            
+            # Check if container is running
+            if docker ps | grep $CONTAINER_NAME; then
+              echo "Container is running, checking health..."
+              
+              # Multiple health check attempts
+              HEALTH_SUCCESS=false
+              for i in {1..6}; do
+                echo "Health check attempt $i/6..."
+                if curl -f -s http://localhost:$PORT/health; then
+                  HEALTH_SUCCESS=true
+                  break
+                fi
+                sleep 5
+              done
+              
+              if [ "$HEALTH_SUCCESS" = true ]; then
+                echo "$IMAGE_TAG" > ~/previous_image_tag.txt
+                echo "Deployment successful."
               else
-                echo "No previous image to roll back to."
+                echo "Health check failed after 6 attempts. Rolling back..."
+                docker stop $CONTAINER_NAME || true
+                docker rm $CONTAINER_NAME || true
+                
+                if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
+                  echo "Rolling back to previous image: $PREVIOUS_IMAGE_TAG"
+                  docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
+                  echo "Rollback completed"
+                else
+                  echo "No previous image to roll back to."
+                fi
+                exit 1
               fi
+            else
+              echo "Container failed to start"
+              exit 1
             fi
