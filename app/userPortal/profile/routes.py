@@ -342,8 +342,3 @@ def edit_public_slug():
 
     except Exception as e:
         current_app.logger.error(f'Failed to edit public slug: {e}', exc_info=True)
-<<<<<<< HEAD
-        return jsonify({'error': 'Failed to edit slug', 'details': str(e)}), 500
-=======
-        return jsonify({'error': 'Failed to edit slug', 'details': str(e)}), 500
->>>>>>> b4bce718ab2f92870cb357ba055f56bfd64ff539
