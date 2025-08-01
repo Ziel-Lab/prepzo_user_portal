@@ -103,11 +103,24 @@ def require_authentication(f):
                 elif hasattr(user, 'user_metadata') and user.user_metadata:
                     # Fallback to user_metadata if app_metadata not available
                     g.user_claims = user.user_metadata
-                    
-                # Log enhanced authentication info
+                
+                # Validate token freshness if available
                 token_version = g.user_claims.get('token_version', 'legacy')
+                hook_processed_at = g.user_claims.get('hook_processed_at')
+                issued_at = g.user_claims.get('issued_at')
+                
+                # Check if token is stale (older than 24 hours) for v2+ tokens
+                if token_version != 'legacy' and issued_at:
+                    token_age = time.time() - issued_at
+                    if token_age > 86400:  # 24 hours
+                        current_app.logger.info(f"Token for user {user.id[:8]}*** is {int(token_age/3600)}h old, may need refresh")
+                        g.user_claims['token_age_hours'] = int(token_age / 3600)
+                
+                # Enhanced logging with security metrics
                 subscription_plan = g.user_claims.get('subscription_plan_id', 'unknown')
-                current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** (token: {token_version}, plan: {subscription_plan}) using dual-client architecture")
+                webhook_id = g.user_claims.get('webhook_id', 'N/A')
+                current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** (token: {token_version}, plan: {subscription_plan}, webhook: {webhook_id[:8]}***) using dual-client architecture")
+                
             except Exception as e:
                 current_app.logger.warning(f"Could not extract custom claims for user {user.id[:8]}***: {e}")
                 current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** using dual-client architecture")
@@ -116,43 +129,88 @@ def require_authentication(f):
             error_message = str(e).lower()
             
             # Differentiate between different auth failures for frontend handling
-            # Note: Supabase often returns "invalid JWT" for expired tokens, so we're more inclusive
+            # Enhanced error categorization for production
             if ("expired" in error_message or "stale" in error_message or "invalid claim" in error_message or 
                 "signature is invalid" in error_message or "unable to parse or verify" in error_message):
-                current_app.logger.warning(f"Authentication failed: Stale/Expired JWT from IP {request.remote_addr} - {str(e)}")
-                return jsonify({
+                current_app.logger.warning(f"Authentication failed: Stale/Expired JWT from IP {request.remote_addr} - {type(e).__name__}")
+                response = jsonify({
                     "error": "token_expired",
                     "error_type": "stale_jwt", 
                     "message": "Your session token has expired",
-                    "action": "refresh_token"
-                }), 401
-            elif "malformed" in error_message or "not found" in error_message:
-                current_app.logger.warning(f"Authentication failed: Invalid JWT from IP {request.remote_addr} - {str(e)}")
-                return jsonify({
+                    "action": "refresh_token",
+                    "timestamp": int(time.time())
+                })
+                response.headers['Cache-Control'] = 'no-store'
+                response.headers['Pragma'] = 'no-cache'
+                return response, 401
+            elif "malformed" in error_message or "not found" in error_message or "invalid jwt" in error_message:
+                current_app.logger.warning(f"Authentication failed: Invalid JWT from IP {request.remote_addr} - {type(e).__name__}")
+                response = jsonify({
                     "error": "token_invalid",
                     "error_type": "invalid_jwt",
                     "message": "Invalid authentication token",
-                    "action": "login_required"
-                }), 401
+                    "action": "login_required",
+                    "timestamp": int(time.time())
+                })
+                response.headers['Cache-Control'] = 'no-store'
+                response.headers['Pragma'] = 'no-cache'
+                return response, 401
+            elif "rate limit" in error_message or "too many" in error_message:
+                current_app.logger.warning(f"Authentication failed: Rate limited from IP {request.remote_addr}")
+                response = jsonify({
+                    "error": "rate_limited",
+                    "error_type": "rate_limit",
+                    "message": "Too many authentication attempts. Please wait.",
+                    "action": "wait_and_retry",
+                    "timestamp": int(time.time())
+                })
+                response.headers['Retry-After'] = '60'
+                return response, 429
             else:
                 # Default to allowing refresh attempt for unknown errors
-                current_app.logger.warning(f"Authentication failed: Unknown auth error from IP {request.remote_addr} - {str(e)}")
-                return jsonify({
+                current_app.logger.warning(f"Authentication failed: Unknown auth error from IP {request.remote_addr} - {type(e).__name__}: {str(e)}")
+                response = jsonify({
                     "error": "token_expired",
                     "error_type": "stale_jwt",
                     "message": "Authentication failed - please refresh",
-                    "action": "refresh_token"
-                }), 401
+                    "action": "refresh_token",
+                    "timestamp": int(time.time())
+                })
+                response.headers['Cache-Control'] = 'no-store'
+                response.headers['Pragma'] = 'no-cache'
+                return response, 401
         except AuthRetryableError as e:
             current_app.logger.error(f"Authentication failed after retries due to network issues from IP {request.remote_addr}: {str(e)}")
-            return jsonify({"error": "Authentication service temporarily unavailable. Please try again in a moment."}), 503
+            response = jsonify({
+                "error": "authentication_service_unavailable",
+                "error_type": "service_error",
+                "message": "Authentication service temporarily unavailable. Please try again in a moment.",
+                "action": "retry_later",
+                "timestamp": int(time.time())
+            })
+            response.headers['Retry-After'] = '5'
+            return response, 503
         except APIError as e:
             current_app.logger.error(f"Authentication API call failed from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
-            status_code = getattr(e, 'status', 401) 
-            return jsonify({"error": "Authentication failed"}), status_code
+            status_code = getattr(e, 'status', 401)
+            response = jsonify({
+                "error": "authentication_api_error",
+                "error_type": "api_error",
+                "message": "Authentication service error",
+                "action": "refresh_token" if status_code == 401 else "retry_later",
+                "timestamp": int(time.time())
+            })
+            return response, status_code
         except Exception as e:
             current_app.logger.error(f"Unexpected authentication error from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
-            return jsonify({"error": "An internal error occurred during authentication"}), 500
+            response = jsonify({
+                "error": "internal_auth_error",
+                "error_type": "internal_error",
+                "message": "An internal error occurred during authentication",
+                "action": "contact_support",
+                "timestamp": int(time.time())
+            })
+            return response, 500
             
         return f(*args, **kwargs)
             

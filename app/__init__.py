@@ -47,6 +47,13 @@ def create_app():
 
     init_supabase(app)  # Initializes Supabase client with app config
     init_livekit(app)   # Initializes LiveKit client with app config
+    
+    # Validate Supabase hook configuration from AWS Secrets Manager
+    from .auth.routes import validate_hook_configuration
+    if not validate_hook_configuration(app):
+        app.logger.error("FATAL: Supabase hook configuration validation failed - app may not start properly")
+        # Note: In production, you might want to raise an exception here to prevent startup
+        # raise RuntimeError("Invalid Supabase hook configuration")
 
     @app.after_request
     def after_request_func(response):
