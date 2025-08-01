@@ -2,6 +2,7 @@ from flask import request, jsonify, current_app, g
 from . import mock_interview_bp
 from ..subscription.helpers import require_authentication, get_user_display_name
 from ...extensions import supabase, get_user_client, get_admin_client
+from ...pagination import MockInterviewPagination
 import uuid
 import asyncio
 import openai
@@ -902,46 +903,137 @@ def get_user_mock_interview_limits():
 @mock_interview_bp.route('/sessions', methods=['GET'])
 @require_authentication
 def get_user_sessions():
-    """Get user's interview sessions"""
+    """Get user's interview sessions with cursor pagination - FIXED"""
     try:
-        # Use admin client with explicit user filtering for security due to user client session issues
-        try:
-            admin_client = get_admin_client()
-        except RuntimeError as e:
-            logger.error(f"Admin client not available: {e}")
-            return jsonify({'error': 'Server configuration error'}), 500
-            
-        # Explicitly filter by user_id for security (equivalent to RLS)
-        result = admin_client.table('mock_interview')\
-            .select('*')\
-            .eq('user_id', g.user.id)\
-            .order('created_at', desc=True)\
-            .execute()
+        admin_client = get_admin_client()
         
-        # Add display status information to each session
-        sessions_with_display = []
-        for session in (result.data or []):
-            display_info = get_display_status(
-                session.get('status', 'created'),
-                session.get('status_prep', 'PENDING')
-            )
-            
-            session_with_display = {
-                **session,
-                'display_status': display_info['display_status'],
-                'display_text': display_info['display_text'],
-                'is_ready_to_join': display_info['is_ready_to_join'],
-                'color_class': display_info['color_class']
-            }
-            sessions_with_display.append(session_with_display)
+        # Get paginated sessions using fixed pagination
+        sessions, pagination_metadata = MockInterviewPagination.paginate_user_sessions(
+            admin_client, 
+            g.user.id, 
+            request.args
+        )
+        
+        # Add display status to each session
+        for session in sessions:
+            try:
+                display_info = get_display_status(
+                    session.get('status', 'created'),
+                    session.get('status_prep', 'PENDING')
+                )
+                
+                session['display_status'] = display_info['display_status']
+                session['display_text'] = display_info['display_text']
+                session['is_ready_to_join'] = display_info['is_ready_to_join']
+                session['color_class'] = display_info['color_class']
+                
+            except Exception:
+                # Fallback to basic status
+                session['display_status'] = 'unknown'
+                session['display_text'] = 'Unknown Status'
+                session['is_ready_to_join'] = False
+                session['color_class'] = 'default'
         
         return jsonify({
-            'sessions': sessions_with_display
+            'sessions': sessions,
+            'pagination': pagination_metadata
         }), 200
         
     except Exception as e:
-        logger.error(f"Error fetching user sessions: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
+        logger.error(f"Sessions API error: {str(e)}")
+        return jsonify({'error': 'Unable to load sessions'}), 500
+
+@mock_interview_bp.route('/sessions/mobile', methods=['GET'])
+@require_authentication
+def get_user_sessions_mobile():
+    """Mobile optimized endpoint with cursor pagination - FIXED"""
+    try:
+        admin_client = get_admin_client()
+        
+        # Get paginated sessions using fixed pagination
+        sessions, pagination_metadata = MockInterviewPagination.paginate_user_sessions(
+            admin_client, 
+            g.user.id, 
+            request.args
+        )
+        
+        # Create mobile-optimized session data
+        mobile_sessions = []
+        for session in sessions:
+            try:
+                display_info = get_display_status(
+                    session.get('status', 'created'),
+                    session.get('status_prep', 'PENDING')
+                )
+                
+                mobile_session = {
+                    'id': session['id'],
+                    'title': session.get('title', 'Interview Session'),
+                    'position': session.get('position', 'Position'),
+                    'company_name': session.get('company_name', ''),
+                    'interview_type': session.get('interview_type', 'behavioral'),
+                    'created_at': session['created_at'],
+                    'display_status': display_info['display_status'],
+                    'display_text': display_info['display_text'],
+                    'is_ready_to_join': display_info['is_ready_to_join'],
+                    'color_class': display_info['color_class']
+                }
+                mobile_sessions.append(mobile_session)
+                
+            except Exception:
+                # Basic fallback for mobile
+                mobile_sessions.append({
+                    'id': session['id'],
+                    'title': session.get('title', 'Interview Session'),
+                    'position': session.get('position', 'Position'),
+                    'created_at': session['created_at'],
+                    'display_status': 'unknown',
+                    'is_ready_to_join': False
+                })
+        
+        return jsonify({
+            'sessions': mobile_sessions,
+            'pagination': pagination_metadata
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Mobile sessions API error: {str(e)}")
+        return jsonify({'error': 'Unable to load sessions'}), 500
+
+@mock_interview_bp.route('/sessions/verify', methods=['GET'])
+@require_authentication
+def verify_pagination():
+    """Quick verification that pagination is working - REMOVE AFTER TESTING"""
+    try:
+        admin_client = get_admin_client()
+        
+        # Count total sessions
+        count_result = admin_client.table('mock_interview')\
+            .select('id', count='exact')\
+            .eq('user_id', g.user.id)\
+            .execute()
+        
+        total_count = getattr(count_result, 'count', 0)
+        
+        # Get first page with limit 5 for testing
+        sessions, pagination = MockInterviewPagination.paginate_user_sessions(
+            admin_client, g.user.id, {'limit': '5'}
+        )
+        
+        return jsonify({
+            'verification': {
+                'total_sessions_in_db': total_count,
+                'first_5_sessions_count': len(sessions),
+                'has_more': pagination.get('has_more', False),
+                'next_cursor_exists': 'next_cursor' in pagination,
+                'pagination_working': total_count > 5 and pagination.get('has_more', False),
+                'status': 'WORKING' if (total_count > 5 and pagination.get('has_more', False)) else 'CHECK_NEEDED'
+            },
+            'pagination_metadata': pagination
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'verification_error': str(e)}), 500
 
 @mock_interview_bp.route('/session/<session_id>/end', methods=['POST'])
 @require_authentication
