@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 async def get_interview_config(room_name: str):
     """
-    Get interview configuration from database
+    Get interview configuration from db
     
     Args:
         room_name (str): The room name
