@@ -14,21 +14,17 @@ jobs:
       
       - name: Free up disk space
         run: |
-          echo "Cleaning up disk space..."
           echo "Before cleanup:"
           df -h
-          echo "Removing unnecessary files..."
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/hostedtoolcache
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/share/boost
           sudo rm -rf /opt/microsoft
-          # Clean Docker to free up more space
           docker system prune -af --volumes || true
           echo "After cleanup:"
           df -h
-          echo "Disk cleanup completed!"
       
       - name: Determine short SHA
         id: vars
@@ -51,28 +47,15 @@ jobs:
           ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
         run: |
-          echo "Building Docker image..."
-          echo "Available space before build:"
-          df -h
-          # Build with reduced build context and no cache from previous builds
-          docker build \
-            --no-cache \
-            --rm \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          echo "Pushing to ECR..."
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "Cleaning up local Docker images..."
-          docker image prune -f
-          echo "Build and push completed!"
 
       - name: Deploy to EC2 with rollback
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v0.1.6
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 300s
-          command_timeout: 600s
           script: |
             set -e
 
@@ -115,6 +98,6 @@ jobs:
                   --name $CONTAINER_NAME \
                   $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
               else
-                echo "WARNING: No previous image to roll back to."
+                echo "No previous image to roll back to."
               fi
             fi
