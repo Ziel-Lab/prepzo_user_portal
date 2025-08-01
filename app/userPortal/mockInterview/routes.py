@@ -222,11 +222,9 @@ def create_interview_session():
     try:
         data = request.get_json()
         
-        # EMERGENCY DEBUG - This will definitely show up
-        logger.info("EMERGENCY DEBUG - RAW REQUEST DATA:")
-        logger.info(str(data))
+
         
-        # Check user's session limits before creating
+        # Get user's plan information
         admin_client = get_admin_client()
         user_id = g.user.id
         
@@ -277,22 +275,7 @@ def create_interview_session():
         
         # No special handling - use exact database values for all plans
         
-        # Check if user has reached their limit or plan doesn't allow sessions
-        if not is_unlimited:
-            if session_limit <= 0:
-                return jsonify({
-                    'error': 'Your current plan does not include mock interview sessions. Please upgrade your plan.',
-                    'limit_reached': True,
-                    'current_count': current_sessions,
-                    'limit': session_limit
-                }), 403
-            elif current_sessions >= session_limit:
-                return jsonify({
-                    'error': f'You have reached your session limit ({current_sessions}/{session_limit}). Please upgrade your plan.',
-                    'limit_reached': True,
-                    'current_count': current_sessions,
-                    'limit': session_limit
-                }), 403
+        # Allow all users to create sessions regardless of plan limits
         
         # Basic interview parameters - extract from request data
         interview_type = data.get('type') or data.get('interview_type', 'behavioral')
@@ -911,18 +894,12 @@ def get_user_mock_interview_limits():
             'sessions_remaining': 999999999 if is_unlimited else max(0, session_limit - current_sessions),
             'attempts_per_session': plan_limits.get('mock_interview_attempts', 3),
             'is_unlimited_sessions': is_unlimited,
-            'can_create_session': False,  # Will be set correctly below based on limits
+            'can_create_session': True,  # Always allow session creation
             'plan_name': 'Free' if plan_id == 1 else ('Pro' if plan_id == 2 else 'Premium')
         }
         
-        # Use exact database values for all plans - no special overrides
-        if not is_unlimited and session_limit > 0:
-            response_data['can_create_session'] = current_sessions < session_limit
-        elif is_unlimited:
-            response_data['can_create_session'] = True
-        else:
-            # session_limit is 0 or None - no sessions allowed
-            response_data['can_create_session'] = False
+        # Always allow session creation - button always appears
+        response_data['can_create_session'] = True
         
         return jsonify(response_data), 200
         
