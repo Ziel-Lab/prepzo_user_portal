@@ -3,75 +3,111 @@ from flask import jsonify, g, request, current_app, make_response
 from app import extensions 
 from functools import wraps
 import calendar
+import time
 from postgrest.exceptions import APIError
-from gotrue.errors import AuthApiError
+from gotrue.errors import AuthApiError, AuthRetryableError
 from dateutil.relativedelta import relativedelta
 
 
 class QuotaExceededError(Exception):
     pass
 
+def _retry_auth_with_backoff(admin_client, jwt_token, max_retries=3):
+    """
+    Retry authentication with exponential backoff for AuthRetryableError
+    """
+    for attempt in range(max_retries):
+        try:
+            return admin_client.auth.get_user(jwt_token)
+        except AuthRetryableError as e:
+            if attempt == max_retries - 1:
+                # Last attempt, re-raise the error
+                raise e
+            
+            # Exponential backoff: 0.1s, 0.2s, 0.4s
+            delay = 0.1 * (2 ** attempt)
+            current_app.logger.warning(f"Auth retry {attempt + 1}/{max_retries} failed with {type(e).__name__}, retrying in {delay}s...")
+            time.sleep(delay)
+    
+    # This should never be reached, but just in case
+    raise AuthRetryableError("Max retries exceeded")
+
 def require_authentication(f):
     """
     Decorator to protect routes, set g.user, and handle CORS preflight requests.
-    - This decorator now creates a full, self-contained response for OPTIONS requests
-      to ensure CORS preflights succeed before the main app logic is hit.
+    Uses dual Supabase client architecture:
+    - Admin client for JWT verification 
+    - User client for all data operations with RLS
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Manually handle CORS preflight requests.
-        # This is necessary because this decorator runs before the main Flask-CORS extension.
+        # Handle CORS preflight requests
         if request.method == 'OPTIONS':
             response = make_response(jsonify(success=True))
             
-            # The browser needs to know which origin is allowed to make the request.
-            # We reflect the request's Origin header, which is standard and secure practice.
-            # The app-level Flask-CORS config will still validate this origin on the actual request.
             origin = request.headers.get('Origin')
             if origin:
                 response.headers.add('Access-Control-Allow-Origin', origin)
             else:
-                 # For cases where the origin is not sent (e.g. server-to-server, older browsers)
-                 # We can allow all origins for OPTIONS as it's a non-destructive request.
-                 # The actual request will still be validated.
-                 response.headers.add('Access-Control-Allow-Origin', '*')
+                response.headers.add('Access-Control-Allow-Origin', '*')
 
-            # Specify what headers and methods are allowed in the actual request.
             response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
             response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response, 204
 
+        # Extract and validate JWT token
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            current_app.logger.warning(f"Bad or missing Authorization header received: {auth_header!r}")
+            current_app.logger.warning(f"Authentication failed: Missing or malformed Authorization header from IP {request.remote_addr}")
             return jsonify({"error": "Missing or malformed Authorization header"}), 401
 
         jwt_token = auth_header.split(" ", 1)[1]
         if not jwt_token or len(jwt_token.split(".")) != 3:
-            current_app.logger.warning(f"Malformed JWT received: {jwt_token!r}")
+            current_app.logger.warning(f"Authentication failed: Malformed JWT received from IP {request.remote_addr}")
             return jsonify({"error": "Invalid token format"}), 401
 
         try:
-            user_response = extensions.supabase.auth.get_user(jwt_token)
+            # Get both Supabase clients
+            admin_client = extensions.get_admin_client()
+            user_client = extensions.get_user_client()
+            
+            # Use admin client to verify JWT token with retry for network issues
+            user_response = _retry_auth_with_backoff(admin_client, jwt_token)
             user = user_response.user
             if not user or not user.id:
                 raise ValueError("Supabase did not return a user object in the response.")
+            
+            # Set JWT token on user client for RLS context
+            # This ensures all subsequent operations are scoped to this user
+            try:
+                user_client.auth.set_session(
+                    access_token=jwt_token,
+                    refresh_token=None  # We only need the access token for RLS
+                )
+            except Exception as e:
+                current_app.logger.warning(f"Failed to set user client session: {e}")
+            
+            # Store user and clients in Flask g for route access
             g.user = user
+            g.supabase = user_client  # Default to user client for data operations
+            g.supabase_user = user_client  # Explicit user client
+            g.supabase_admin = admin_client  # Admin client for special operations
+            
+            current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** using dual-client architecture")
 
         except AuthApiError as e:
-            # This specific error means the user's JWT is valid but the session/user
-            # is not found on Supabase side (e.g., user deleted, session logged out).
-            # This is a client-side issue (stale token).
-            current_app.logger.warning(f"Authentication failed with stale JWT: {e.message}")
-            return jsonify({"error": "Your session has expired. Please log in again.", "details": str(e.message)}), 401
+            current_app.logger.warning(f"Authentication failed: Stale JWT from IP {request.remote_addr}")
+            return jsonify({"error": "Your session has expired. Please log in again."}), 401
+        except AuthRetryableError as e:
+            current_app.logger.error(f"Authentication failed after retries due to network issues from IP {request.remote_addr}: {str(e)}")
+            return jsonify({"error": "Authentication service temporarily unavailable. Please try again in a moment."}), 503
         except APIError as e:
-            current_app.logger.error(f"Authentication API call failed: {e}", exc_info=True)
-            error_details = e.message if isinstance(e.message, dict) else str(e.message)
+            current_app.logger.error(f"Authentication API call failed from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
             status_code = getattr(e, 'status', 401) 
-            return jsonify({"error": "Authentication failed", "details": error_details}), status_code
+            return jsonify({"error": "Authentication failed"}), status_code
         except Exception as e:
-            current_app.logger.error(f"An unexpected exception occurred during authentication: {e}", exc_info=True)
+            current_app.logger.error(f"Unexpected authentication error from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
             return jsonify({"error": "An internal error occurred during authentication"}), 500
             
         return f(*args, **kwargs)
@@ -79,45 +115,40 @@ def require_authentication(f):
     return decorated_function
 
 def get_user_display_name(user):
-    """Safely retrieves the display name from a user object."""
-    if not user or not hasattr(user, 'user_metadata') or not user.user_metadata:
-        return 'N/A'
-    # Prioritize 'full_name', then 'name', and finally 'N/A'
-    return user.user_metadata.get('full_name') or user.user_metadata.get('name') or 'N/A'
-
-def get_anniversary_period(created_at_str, today):
     """
-    Calculates the current subscription period based on the user's signup anniversary.
-    Handles edge cases like signing up on the 31st for shorter months.
+    Safely extract display name from user object
     """
-    try:
-        # Supabase provides created_at as an ISO 8601 string with timezone
-        created_at_date = datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).date()
-    except (ValueError, TypeError):
-        # Fallback for unexpected format, default to 1st of month.
-        current_app.logger.warning(f"Could not parse user created_at string: '{created_at_str}'. Falling back to calendar month period.")
-        return today.replace(day=1), (today.replace(day=1) + relativedelta(months=1) - relativedelta(days=1))
+    if not user or not hasattr(user, 'user_metadata'):
+        return "User"
+    
+    metadata = user.user_metadata or {}
+    return (
+        metadata.get('full_name') or 
+        metadata.get('name') or 
+        metadata.get('display_name') or 
+        user.email or 
+        "User"
+    )
 
-    anniversary_day = created_at_date.day
-
-    # Determine the year and month of the period's start date
-    if today.day >= anniversary_day:
-        # The period started this month
-        start_date_base = today
+def get_anniversary_period(user_created_at, reference_date):
+    """
+    Calculate billing period based on user creation date
+    """
+    # Convert string to date if needed
+    if isinstance(user_created_at, str):
+        user_created_at = datetime.fromisoformat(user_created_at.replace('Z', '+00:00')).date()
+    elif hasattr(user_created_at, 'date'):
+        user_created_at = user_created_at.date()
+    
+    # Calculate the anniversary month for the reference date
+    if reference_date.day >= user_created_at.day:
+        # We're past the anniversary day this month
+        period_start = reference_date.replace(day=user_created_at.day)
+        period_end = (period_start + relativedelta(months=1)) - relativedelta(days=1)
     else:
-        # The period started last month
-        start_date_base = today - relativedelta(months=1)
-
-    # Safely create the start date, clamping to the last day of the month if needed
-    try:
-        period_start = date(start_date_base.year, start_date_base.month, anniversary_day)
-    except ValueError:
-        # This handles cases where anniversary_day is invalid for the month (e.g., 31 in Feb).
-        # We clamp to the last day of that month.
-        last_day_of_month = (date(start_date_base.year, start_date_base.month, 1) + relativedelta(months=1) - relativedelta(days=1)).day
-        period_start = date(start_date_base.year, start_date_base.month, last_day_of_month)
-
-    period_end = period_start + relativedelta(months=1) - relativedelta(days=1)
+        # We're before the anniversary day this month
+        period_end = reference_date.replace(day=user_created_at.day) - relativedelta(days=1)
+        period_start = period_end.replace(day=user_created_at.day) - relativedelta(months=1) + relativedelta(days=1)
     
     return period_start, period_end
 
@@ -132,14 +163,14 @@ def handle_period_rollover(supabase, uid, subscription):
     # --- Start: Robust check for required date fields ---
     sub_id = subscription.get('id')
     if not subscription.get('current_period_end'):
-        current_app.logger.error(f"CRITICAL: Subscription {sub_id} for user {uid} is missing 'current_period_end'. Cannot check for rollover.")
+        current_app.logger.error(f"CRITICAL: Subscription {sub_id} for user {uid[:8]}*** is missing 'current_period_end'. Cannot check for rollover.")
         raise ValueError(f"Subscription {sub_id} is missing its period end date.")
     # --- End: Robust check ---
 
     current_period_end = datetime.strptime(subscription['current_period_end'], '%Y-%m-%d').date()
 
     if today > current_period_end:
-        current_app.logger.info(f"User {uid} billing period expired on {current_period_end}. Rolling over subscription dates.")
+        current_app.logger.info(f"User {uid[:8]}*** billing period expired on {current_period_end}. Rolling over subscription dates.")
         
         next_period_start, next_period_end = get_anniversary_period(g.user.created_at, today)
         
@@ -153,17 +184,14 @@ def handle_period_rollover(supabase, uid, subscription):
             .execute()
         
         if not updated_sub_res or not updated_sub_res.data:
-             error_msg = f"Failed to update subscription period for user {uid}. DB response was empty."
+             error_msg = f"Failed to update subscription period for user {uid[:8]}***. DB response was empty."
              current_app.logger.error(error_msg)
              raise Exception(error_msg)
 
 def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
     """
     Decorator that checks a user's feature usage against their plan limits.
-    It identifies the current usage period and handles rollovers by creating a new
-    usage record for the new month if necessary.
-    This decorator is robust against mid-cycle plan changes by always using the
-    user's current subscription as the source of truth for limits.
+    Uses the user Supabase client to ensure RLS is enforced.
     """
     def decorator(f):
         @wraps(f)
@@ -172,22 +200,25 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
                 return jsonify({"error": "User not authenticated for feature check."}), 500
 
             try:
-                supabase = extensions.supabase
+                # Use admin client for subscription check (temporary workaround for JWT session issue)
+                from app.extensions import get_admin_client
+                admin_supabase = get_admin_client()
+                supabase = g.supabase_user
                 uid = g.user.id
                 display_name = get_user_display_name(g.user)
 
-                # Step 1: Get the user's current subscription plan. This is the source of truth.
-                sub_res = supabase.table('user_subscriptions').select('plan_id').eq('user_id', uid).single().execute()
+                # Step 1: Get the user's current subscription plan (using admin client due to JWT session issue)
+                sub_res = admin_supabase.table('user_subscriptions').select('plan_id').eq('user_id', uid).single().execute()
                 current_plan_id = sub_res.data['plan_id'] if sub_res.data else 1  # Default to Free plan
 
-                # Step 2: Get the limits for the user's CURRENT plan.
-                plan_res = supabase.table('subscription_plans').select('*').eq('id', current_plan_id).single().execute()
+                # Step 2: Get the limits for the user's CURRENT plan (this table is public read)
+                plan_res = admin_supabase.table('subscription_plans').select('*').eq('id', current_plan_id).single().execute()
                 if not plan_res.data:
                     return jsonify({"error": "Could not verify your current subscription plan details."}), 500
                 current_plan_limits = plan_res.data
 
-                # Step 3: Get the user's most recent usage record to check counts.
-                usage_res = supabase.table('feature_usage') \
+                # Step 3: Get the user's most recent usage record (using admin client with explicit user filter)
+                usage_res = admin_supabase.table('feature_usage') \
                     .select('*') \
                     .eq('user_id', uid) \
                     .order('period_end', desc=True) \
@@ -223,9 +254,9 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
                 
                 if not usage_record or is_expired:
                     if is_expired:
-                        current_app.logger.info(f"Usage period for user {uid} expired on {usage_record['period_end']}. Creating new record with current plan {current_plan_id}.")
+                        current_app.logger.info(f"Usage period for user {uid[:8]}*** expired on {usage_record['period_end']}. Creating new record with current plan {current_plan_id}.")
                     else:
-                        current_app.logger.info(f"No usage record for user {uid}. Creating one with current plan {current_plan_id}.")
+                        current_app.logger.info(f"No usage record for user {uid[:8]}***. Creating one with current plan {current_plan_id}.")
 
                     period_start, period_end = get_anniversary_period(g.user.created_at, today)
                     
@@ -242,7 +273,7 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
                                 period_col = key.replace('_lifetime_count', '_period_count')
                                 initial_usage[period_col] = 0 # Reset period count
 
-                    new_usage_res = supabase.table('feature_usage').upsert(
+                    new_usage_res = admin_supabase.table('feature_usage').upsert(
                         initial_usage, 
                         on_conflict='user_id',
                         returning='representation'
@@ -254,8 +285,8 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
 
                 # Step 5: Handle mid-cycle plan changes.
                 elif usage_record.get('plan_id') != current_plan_id:
-                    current_app.logger.info(f"User {uid} plan changed mid-cycle from {usage_record.get('plan_id')} to {current_plan_id}. Updating usage record.")
-                    supabase.table('feature_usage') \
+                    current_app.logger.info(f"User {uid[:8]}*** plan changed mid-cycle from {usage_record.get('plan_id')} to {current_plan_id}. Updating usage record.")
+                    admin_supabase.table('feature_usage') \
                         .update({'plan_id': current_plan_id}) \
                         .eq('user_id', uid) \
                         .eq('period_start', usage_record['period_start']) \
@@ -277,7 +308,7 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
                     }), 429
                 
             except Exception as e:
-                current_app.logger.error(f"An unexpected error occurred in check_and_use_feature pre-check: {e}", exc_info=True)
+                current_app.logger.error(f"An unexpected error occurred in check_and_use_feature pre-check for user {uid[:8] if 'uid' in locals() else 'unknown'}***: {type(e).__name__}", exc_info=True)
                 return jsonify({"error": "An internal server error occurred."}), 500
 
             # --- PRE-CHECK COMPLETE ---

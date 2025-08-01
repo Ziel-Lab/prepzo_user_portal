@@ -8,7 +8,15 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy only the download script first
+COPY download_models.py .
+
+# Download models during build (requires environment variables at build time)
+# Comment out the next line if you prefer runtime download via entrypoint.sh
+# RUN python download_models.py
+
 COPY . .
+
 
 EXPOSE 5000
 
@@ -19,4 +27,6 @@ EXPOSE 5000
 # and run in debug mode, you might set these, but for production, 
 # you'd typically use a production-grade WSGI server like Gunicorn.
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "run:app"] 
+
+RUN chmod +x entrypoint.sh
+CMD ["./entrypoint.sh"] 

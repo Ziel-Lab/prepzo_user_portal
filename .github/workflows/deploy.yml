@@ -3,7 +3,7 @@ name: Build and Deploy to EC2
 on:
   push:
     branches:
-      - main
+      - dev
 
 jobs:
   build-and-deploy:
@@ -30,8 +30,8 @@ jobs:
       - name: Build, tag, and push image to ECR
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
-          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REGISTRY: ${{ secrets.ECR_DEV_REGISTRY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_DEV_REPOSITORY }}
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
@@ -39,16 +39,16 @@ jobs:
       - name: Deploy to EC2 with rollback
         uses: appleboy/ssh-action@v0.1.6
         with:
-          host: ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_DEV_HOST }}
           username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_DEV_SSH_KEY }}
           script: |
             set -e
 
             IMAGE_TAG=${{ steps.vars.outputs.sha_short }}
-            ECR_REGISTRY=${{ secrets.ECR_REGISTRY }}
-            ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY }}
-            CONTAINER_NAME=prepzo-prod
+            ECR_REGISTRY=${{ secrets.ECR_DEV_REGISTRY }}
+            ECR_REPOSITORY=${{ secrets.ECR_DEV_REPOSITORY }}
+            CONTAINER_NAME=prepzo-dev
             PORT=5000
 
             echo "Deploying image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"

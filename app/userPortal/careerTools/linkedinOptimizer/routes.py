@@ -1,6 +1,6 @@
 from flask import request, jsonify, current_app, g
 import requests 
-from app import extensions 
+from app.extensions import get_user_client, get_admin_client
 import json
 import logging 
 from threading import Thread
@@ -36,10 +36,12 @@ def get_request_data():
 @require_authentication
 def get_linkedin_optimizer_history():
     current_user_id = str(g.user.id)
+    # Use admin client with explicit user filtering for consistent data access
+    admin_supabase = get_admin_client()
 
     try:
         query_response = (
-            extensions.supabase.table("linkedin_optimizer")
+            admin_supabase.table("linkedin_optimizer")
             .select("*")
             .eq("uid", current_user_id)
             .order('created_at', desc=True)
@@ -55,6 +57,8 @@ def get_linkedin_optimizer_history():
 @check_and_use_feature('linkedin_optimize')
 def create_linkedin_optimization():
     current_user_id = str(g.user.id)
+    # Use admin client for INSERT operations (with explicit user filtering for security)
+    admin_supabase = get_admin_client()
     XANO_API_URL_LINKEDIN_OPTIMIZER = current_app.config.get("XANO_API_URL_LINKEDIN_OPTIMIZER")
     
     data = get_request_data()
