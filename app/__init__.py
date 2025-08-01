@@ -20,7 +20,10 @@ from .userPortal.profile import profile_bp
 def create_app():
     app = Flask(__name__)
 
-    secret_name = "userPortal-dev"
+    # Reject extremely large request bodies early (e.g. huge file uploads)
+    app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB
+
+    secret_name = "userPortal"
     region_name = "us-east-1"
     secrets = get_secret(secret_name, region_name)
     if secrets:
@@ -100,7 +103,6 @@ def create_app():
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
-    app.register_blueprint(mock_interview_bp)
     app.register_blueprint(profile_bp)
 
     return app
