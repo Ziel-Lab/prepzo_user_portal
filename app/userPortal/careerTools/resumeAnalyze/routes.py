@@ -1,6 +1,6 @@
 from flask import request, jsonify, current_app, g
 import requests 
-from app.extensions import get_user_client, get_admin_client
+from app import extensions 
 import magic
 import json
 import logging
@@ -15,10 +15,6 @@ from . import resume_analyze_bp
 @check_and_use_feature('resume', auto_increment=False)   # ← check only, no debit yet
 def analyze_resume():
     current_user_id = str(g.user.id)
-    # Use admin client for INSERT operations (with explicit user filtering for security)
-    admin_supabase = get_admin_client()
-    # Use user client for SELECT operations (RLS enforced)
-    user_supabase = get_user_client()
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
@@ -40,7 +36,7 @@ def analyze_resume():
         # Prepare background tasks but don't block on them
         resume_id_from_db = None
         try:
-            doc_query = supabase.table("user_documents") \
+            doc_query = extensions.supabase.table("user_documents") \
                 .select("id") \
                 .eq("document_url", current_resume_url) \
                 .eq("uid", current_user_id) \
@@ -65,25 +61,22 @@ def analyze_resume():
             "created_at": "now()",
         }
 
-        amplitude_payload = {
-            "user_uuid": current_user_id,
-            "company_url": company_website,
-            "original_resume_url": current_resume_url,
-            "score": xano_data.get("score"),
-            "improved_score": xano_data.get("improved_score"),
-            "feedback": xano_data.get("feedback"),
-            "new_resume_url": xano_data.get("new_resume_url")
-        }
-
-        # Fire-and-forget background processing
-        Thread(
-            target=background_db_and_analytics, 
-            args=(db_payload, amplitude_payload), 
-            daemon=True
-        ).start()
+        try:
+            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
+            if not insert_response.data:
+                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
+        except Exception as e:
+            current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
         
-        # Return immediately after Xano success
-        return jsonify(xano_data), xano_response.status_code
+        return (
+            jsonify(
+                {
+                    "job_id": job_id,
+                    "message": "Resume analysis has been queued and is now pending.",
+                }
+            ),
+            202,
+        )
 
     except requests.exceptions.Timeout:
         logging.error("Resume analysis request timed out")
@@ -104,14 +97,28 @@ def analyze_resume():
 @require_authentication
 def get_analyze_resume():
     current_user_id = str(g.user.id)
-    # Use admin client with explicit user filtering for consistent data access
-    admin_supabase = get_admin_client()
-
     try:
-        query_response = admin_supabase.table("analyze_resume") \
-            .select("*") \
-            .eq("user_id", current_user_id) \
-            .execute()
+        job_id_param = request.args.get("job_id")
+
+        if job_id_param:
+            query_response = (
+                extensions.supabase.table("analyze_resume")
+                .select("*")
+                .eq("user_id", current_user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        else:
+            query_response = (
+                extensions.supabase.table("analyze_resume")
+                .select("*")
+                .eq("user_id", current_user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+
+        if query_response is None:
+            return jsonify(None), 200
 
         result_data = getattr(query_response, "data", query_response)
         return jsonify(result_data or None), 200
@@ -126,11 +133,6 @@ def get_analyze_resume():
 @check_and_use_feature('resume')
 def roast_resume():
     current_user_id = str(g.user.id)
-    # Use admin client for INSERT operations (with explicit user filtering for security)
-    admin_supabase = get_admin_client()
-    # Use user client for SELECT operations (RLS enforced)
-    user_supabase = get_user_client()
-    
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
@@ -170,12 +172,12 @@ def roast_resume():
             timestamp = str(int(time.time()))
             file_storage_path = f"{current_user_id}/{timestamp}_{file_to_upload.filename}"
 
-            admin_supabase.storage.from_(SUPABASE_BUCKET).upload(
+            extensions.supabase.storage.from_(SUPABASE_BUCKET).upload(
                 file_storage_path,
                 file_bytes,
                 file_options={"content-type": final_content_type_for_storage}
             )
-            resume_url_for_xano = admin_supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
+            resume_url_for_xano = extensions.supabase.storage.from_(SUPABASE_BUCKET).get_public_url(file_storage_path)
 
 
             document_data = {
@@ -186,7 +188,7 @@ def roast_resume():
                 "display_name": user_name,
                 "document_comments": "Uploaded for resume roast"
             }
-            doc_insert_response = admin_supabase.table("user_documents").insert(document_data).execute()
+            doc_insert_response = extensions.supabase.table("user_documents").insert(document_data).execute()
             
             if doc_insert_response.data and len(doc_insert_response.data) > 0 and doc_insert_response.data[0].get("id"):
                 resume_id_from_db = doc_insert_response.data[0].get("id")
@@ -196,7 +198,7 @@ def roast_resume():
         elif current_resume_url_form:
             resume_url_for_xano = current_resume_url_form
             try:
-                doc_query = user_supabase.table("user_documents") \
+                doc_query = extensions.supabase.table("user_documents") \
                     .select("id") \
                     .eq("document_url", resume_url_for_xano) \
                     .eq("uid", current_user_id) \
