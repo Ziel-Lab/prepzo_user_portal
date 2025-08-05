@@ -8,9 +8,13 @@ services:
                      
     volumes:
       - .:/app       
+      - model_cache:/root/.cache  # Cache for downloaded models
                      
     env_file:
       - .env        
     environment:
       - FLASK_ENV=development 
       - OTHER_VARIABLE=value
+
+volumes:
+  model_cache:

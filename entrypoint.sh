@@ -8,6 +8,15 @@ GUNICORN_PID=$!
 # Wait a few seconds to ensure Flask app is up
 sleep 5
 
+# Download models once before starting the agent
+echo "Downloading AI models..."
+python download_models.py
+MODEL_DOWNLOAD_STATUS=$?
+
+if [ $MODEL_DOWNLOAD_STATUS -ne 0 ]; then
+    echo "Warning: Model download failed, but continuing with agent startup..."
+fi
+
 # Start the LiveKit agent in the background
 python start_agent.py start &
 AGENT_PID=$!

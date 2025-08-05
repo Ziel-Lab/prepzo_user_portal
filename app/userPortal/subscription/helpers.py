@@ -94,11 +94,55 @@ def require_authentication(f):
             g.supabase_user = user_client  # Explicit user client
             g.supabase_admin = admin_client  # Admin client for special operations
             
-            current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** using dual-client architecture")
+            # Extract custom claims from JWT if available (from Custom Access Token Hook)
+            g.user_claims = {}
+            try:
+                # Try to get custom claims from the user object
+                if hasattr(user, 'app_metadata') and user.app_metadata:
+                    g.user_claims = user.app_metadata
+                elif hasattr(user, 'user_metadata') and user.user_metadata:
+                    # Fallback to user_metadata if app_metadata not available
+                    g.user_claims = user.user_metadata
+                    
+                # Log enhanced authentication info
+                token_version = g.user_claims.get('token_version', 'legacy')
+                subscription_plan = g.user_claims.get('subscription_plan_id', 'unknown')
+                current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** (token: {token_version}, plan: {subscription_plan}) using dual-client architecture")
+            except Exception as e:
+                current_app.logger.warning(f"Could not extract custom claims for user {user.id[:8]}***: {e}")
+                current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** using dual-client architecture")
 
         except AuthApiError as e:
-            current_app.logger.warning(f"Authentication failed: Stale JWT from IP {request.remote_addr}")
-            return jsonify({"error": "Your session has expired. Please log in again."}), 401
+            error_message = str(e).lower()
+            
+            # Differentiate between different auth failures for frontend handling
+            # Note: Supabase often returns "invalid JWT" for expired tokens, so we're more inclusive
+            if ("expired" in error_message or "stale" in error_message or "invalid claim" in error_message or 
+                "signature is invalid" in error_message or "unable to parse or verify" in error_message):
+                current_app.logger.warning(f"Authentication failed: Stale/Expired JWT from IP {request.remote_addr} - {str(e)}")
+                return jsonify({
+                    "error": "token_expired",
+                    "error_type": "stale_jwt", 
+                    "message": "Your session token has expired",
+                    "action": "refresh_token"
+                }), 401
+            elif "malformed" in error_message or "not found" in error_message:
+                current_app.logger.warning(f"Authentication failed: Invalid JWT from IP {request.remote_addr} - {str(e)}")
+                return jsonify({
+                    "error": "token_invalid",
+                    "error_type": "invalid_jwt",
+                    "message": "Invalid authentication token",
+                    "action": "login_required"
+                }), 401
+            else:
+                # Default to allowing refresh attempt for unknown errors
+                current_app.logger.warning(f"Authentication failed: Unknown auth error from IP {request.remote_addr} - {str(e)}")
+                return jsonify({
+                    "error": "token_expired",
+                    "error_type": "stale_jwt",
+                    "message": "Authentication failed - please refresh",
+                    "action": "refresh_token"
+                }), 401
         except AuthRetryableError as e:
             current_app.logger.error(f"Authentication failed after retries due to network issues from IP {request.remote_addr}: {str(e)}")
             return jsonify({"error": "Authentication service temporarily unavailable. Please try again in a moment."}), 503

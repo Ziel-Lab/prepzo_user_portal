@@ -8,6 +8,8 @@ import uuid
 # Supabase storage bucket used for user-uploaded resumes
 SUPABASE_BUCKET = "user-documents"
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+# Maximum allowed avatar image size (in bytes)
+MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB limit for avatar files
 
 def allowed_image_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
@@ -150,6 +152,11 @@ def upload_avatar():
             return jsonify({'error': 'Supabase client not initialized'}), 500
 
         file_bytes = file.read()
+
+        # Enforce file size limit before proceeding
+        if len(file_bytes) > MAX_AVATAR_SIZE_BYTES:
+            return jsonify({'error': f'Avatar file exceeds the {MAX_AVATAR_SIZE_BYTES // (1024 * 1024)} MB limit'}), 413
+
         user_id = str(g.user.id)
         file_extension = file.filename.rsplit('.', 1)[1].lower()
         unique_file_name = f"avatar_{user_id}.{file_extension}"
