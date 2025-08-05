@@ -55,6 +55,21 @@ def analyze_resume():
         # Remove None values
         n8n_payload = {k: v for k, v in n8n_payload.items() if v is not None}
 
+        # Insert a pending record into analyze_resume (non-blocking)
+        db_payload = {
+            "user_id": current_user_id,
+            "user_name": user_name,
+            "job_id": job_id,
+            "current_resume": current_resume_url,
+            "company_website": company_website,
+            "job_description": job_description,
+            "additional_comment": additional_comment_text,
+            "status": "PENDING",
+            "feedback_analysis": None,
+            "created_at": "now()",
+        }
+        Thread(target=background_db_and_analytics, args=(db_payload,)).start()
+
         # Call the n8n webhook
         n8n_url = "https://prepzo.app.n8n.cloud/webhook/prod_resume_analyzer"
         n8n_response = requests.post(n8n_url, json=n8n_payload, timeout=30)
