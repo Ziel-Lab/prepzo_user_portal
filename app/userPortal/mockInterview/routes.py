@@ -655,22 +655,72 @@ def join_interview_session(session_id):
         
         session = result.data[0]
         
-        # Check existing attempts for this session
+        # Check existing attempts for this session with full details for recovery
         attempts_result = admin_client.table('mock_interview_attempts')\
-            .select('attempt_number, status')\
+            .select('id, attempt_number, status, room_name, started_at, updated_at')\
             .eq('mock_interview_id', session_id)\
             .order('attempt_number', desc=True)\
             .execute()
         
         existing_attempts = attempts_result.data if attempts_result.data else []
         
+        # Check for stuck attempts (active for more than 15 minutes) and mark them as failed
+        from datetime import datetime, timedelta
+        current_time = datetime.utcnow()
+        
+        for attempt in existing_attempts:
+            if attempt['status'] == 'active' and attempt.get('started_at'):
+                try:
+                    started_at = datetime.fromisoformat(attempt['started_at'].replace('Z', '+00:00'))
+                    if current_time - started_at.replace(tzinfo=None) > timedelta(minutes=15):
+                        logger.warning(f"Found stuck attempt {attempt['id']} - marking as failed")
+                        
+                        # Mark stuck attempt as failed
+                        admin_client.table('mock_interview_attempts')\
+                            .update({
+                                'status': 'failed',
+                                'completed_at': 'now()',
+                                'updated_at': 'now()'
+                            })\
+                            .eq('id', attempt['id'])\
+                            .execute()
+                        
+                        # Try to cleanup the stuck room
+                        try:
+                            from .api import delete_room
+                            cleanup_success = asyncio.run(delete_room(attempt['room_name']))
+                            if cleanup_success:
+                                logger.info(f"Cleaned up stuck room: {attempt['room_name']}")
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to cleanup stuck room {attempt['room_name']}: {cleanup_error}")
+                        
+                        # Update local attempt status
+                        attempt['status'] = 'failed'
+                except Exception as recovery_error:
+                    logger.error(f"Error recovering stuck attempt {attempt['id']}: {recovery_error}")
+        
+        # Refresh attempts list after recovery
+        completed_or_failed_attempts = [a for a in existing_attempts if a['status'] in ['completed', 'failed']]
+        active_attempts = [a for a in existing_attempts if a['status'] == 'active']
+        
         # Check if we can create a new attempt (max 3 attempts per session)
-        if len(existing_attempts) >= 3:
+        total_attempts = len(existing_attempts)
+        if total_attempts >= 3:
             return jsonify({
                 'error': 'Maximum attempts reached for this session (3/3)',
-                'attempts_used': len(existing_attempts),
-                'max_attempts': 3
+                'attempts_used': total_attempts,
+                'max_attempts': 3,
+                'completed_attempts': len(completed_or_failed_attempts),
+                'active_attempts': len(active_attempts)
             }), 403
+        
+        # Check if there's already an active attempt
+        if active_attempts:
+            return jsonify({
+                'error': 'There is already an active interview session for this mock interview',
+                'active_attempt': active_attempts[0],
+                'suggestion': 'Please wait for the current session to complete or contact support'
+            }), 409
         
         next_attempt_number = len(existing_attempts) + 1
         

@@ -97,6 +97,12 @@ class SimpleMockInterviewAgent(Agent):
         self._timeout_task = None
         self._ctx = None  # Will be set in entrypoint
         
+        # Strict RPC tracking
+        self._rpc_sent_successfully = False
+        self._rpc_max_retries = 5
+        self._rpc_retry_delay = 1.0  # seconds
+        self._force_disconnect_timeout = 15.0  # seconds
+        
         # Use the agent prompt directly from database (it already contains comprehensive end_interview instructions)
         instructions = safe_encode_text(agent_prompt.strip())
         
@@ -105,16 +111,165 @@ class SimpleMockInterviewAgent(Agent):
         
         logger.info(f"Simple agent created for session {session_id}")
     
+    async def _send_strict_rpc(self, reason: str, rpc_type: str = "end_interview") -> bool:
+        """
+        Strictly send RPC with retries and confirmation requirement
+        Returns True only if RPC was successfully sent and acknowledged
+        """
+        if self._rpc_sent_successfully:
+            logger.info("RPC already sent successfully, skipping duplicate")
+            return True
+            
+        if not self._ctx or not self._ctx.room:
+            logger.error("No room context available for strict RPC")
+            return False
+        
+        # Find user participants
+        all_remote_participants = list(self._ctx.room.remote_participants.values())
+        user_participants = [p for p in all_remote_participants 
+                           if p.kind != "agent" and not p.identity.startswith('agent')]
+        
+        if not user_participants:
+            logger.warning("No user participants found for strict RPC")
+            return False
+        
+        user_participant = user_participants[0]
+        user_identity = user_participant.identity
+        
+        # Prepare RPC payload
+        rpc_payload = {
+            'reason': safe_encode_text(reason),
+            'timestamp': datetime.utcnow().isoformat(),
+            'session_id': self.session_id,
+            'attempt_id': self.attempt_id,
+            'rpc_type': rpc_type,
+            'requires_confirmation': True
+        }
+        
+        logger.info(f"Starting strict RPC to {user_identity} with {self._rpc_max_retries} max retries")
+        
+        # Retry loop
+        for attempt in range(self._rpc_max_retries):
+            try:
+                # Check connection state before each attempt
+                if hasattr(self._ctx.room, 'connection_state'):
+                    connection_state = str(self._ctx.room.connection_state)
+                    if connection_state not in ['CONNECTED', 'RECONNECTING']:
+                        logger.warning(f"RPC attempt {attempt + 1} skipped - bad connection state: {connection_state}")
+                        if attempt < self._rpc_max_retries - 1:
+                            await asyncio.sleep(self._rpc_retry_delay)
+                            continue
+                        else:
+                            return False
+                
+                # Check participant connection
+                if hasattr(user_participant, 'connection_quality') and user_participant.connection_quality == 'LOST':
+                    logger.warning(f"RPC attempt {attempt + 1} skipped - user connection lost")
+                    if attempt < self._rpc_max_retries - 1:
+                        await asyncio.sleep(self._rpc_retry_delay)
+                        continue
+                    else:
+                        return False
+                
+                logger.info(f"RPC attempt {attempt + 1}/{self._rpc_max_retries} to {user_identity}")
+                
+                # Send RPC with confirmation requirement
+                response = await self._ctx.room.local_participant.perform_rpc(
+                    destination_identity=user_identity,
+                    method=rpc_type,
+                    payload=json.dumps(rpc_payload),
+                    response_timeout=8.0  # Longer timeout for strict mode
+                )
+                
+                # Parse response to check for confirmation
+                try:
+                    response_data = json.loads(response)
+                    if response_data.get('status') == 'success':
+                        logger.info(f"Strict RPC confirmed by frontend on attempt {attempt + 1}")
+                        self._rpc_sent_successfully = True
+                        return True
+                    else:
+                        logger.warning(f"Frontend returned error: {response_data.get('message', 'Unknown error')}")
+                except (json.JSONDecodeError, TypeError):
+                    # Empty or invalid response, but RPC was sent
+                    logger.warning(f"RPC sent but received invalid response on attempt {attempt + 1}")
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"RPC timeout on attempt {attempt + 1}")
+            except Exception as rpc_error:
+                logger.error(f"RPC attempt {attempt + 1} failed: {rpc_error}")
+                
+                # Log specific error types
+                if "engine is closed" in str(rpc_error):
+                    logger.error("LiveKit engine closed - cannot retry RPC")
+                    return False
+                elif "connection error" in str(rpc_error):
+                    logger.warning("Connection error - will retry if attempts remaining")
+            
+            # Wait before retry (except on last attempt)
+            if attempt < self._rpc_max_retries - 1:
+                delay = self._rpc_retry_delay * (attempt + 1)  # Exponential backoff
+                logger.info(f"Waiting {delay}s before RPC retry...")
+                await asyncio.sleep(delay)
+        
+        logger.error(f"All {self._rpc_max_retries} RPC attempts failed")
+        return False
+
+    async def _cleanup_failed_room(self) -> None:
+        """Cleanup room on LiveKit server after connection failure"""
+        try:
+            if not self.session_id:
+                return
+                
+            # Import here to avoid circular imports
+            from .api import delete_room
+            
+            # Construct room name from session and attempt IDs
+            room_name = f"interview_{self.session_id}_attempt_{self.attempt_id.split('_')[-1] if '_' in self.attempt_id else '1'}"
+            
+            logger.info(f"Attempting to cleanup failed room: {room_name}")
+            success = await delete_room(room_name)
+            if success:
+                logger.info(f"Successfully cleaned up room: {room_name}")
+            else:
+                logger.warning(f"Room cleanup may have failed for: {room_name}")
+                
+        except Exception as e:
+            logger.error(f"Error in room cleanup: {e}")
+    
     async def on_enter(self) -> None:
         """Called when agent enters the session"""
         logger.info(f"Simple agent entered session {self.session_id}")
         
-        # Start 14-minute timeout as backup
+        # Start 12-minute timeout as backup
         self._timeout_task = asyncio.create_task(self._timeout_handler())
+
+    async def _wait_for_rpc_opportunity(self) -> None:
+        """
+        Wait for connection to become available for RPC
+        Used during force disconnect timeout period
+        """
+        check_interval = 0.5  # Check every 500ms
+        while True:
+            if not self._ctx or not self._ctx.room:
+                break
+                
+            # Check if connection is good for RPC
+            if hasattr(self._ctx.room, 'connection_state'):
+                connection_state = str(self._ctx.room.connection_state)
+                if connection_state in ['CONNECTED', 'RECONNECTING']:
+                    # Check for user participants
+                    user_participants = [p for p in self._ctx.room.remote_participants.values() 
+                                       if p.kind != "agent" and not p.identity.startswith('agent')]
+                    if user_participants:
+                        logger.info("RPC opportunity detected during force disconnect timeout")
+                        return
+            
+            await asyncio.sleep(check_interval)
     
     async def on_exit(self) -> None:
-        """Called when agent exits the session - ensure interview is completed and frontend is notified"""
-        logger.info(f"Agent exited session {self.session_id}")
+        """Called when agent exits the session - STRICT MODE: Must notify frontend before exit"""
+        logger.info(f"Agent exited session {self.session_id} - STRICT MODE ENABLED")
         
         # Cancel timeout task
         if self._timeout_task and not self._timeout_task.done():
@@ -145,46 +300,82 @@ class SimpleMockInterviewAgent(Agent):
             except:
                 pass
         
-        # ALWAYS send RPC to frontend to close the meeting
-        try:
-            if self._ctx and self._ctx.room:
-                all_remote_participants = list(self._ctx.room.remote_participants.values())
-                user_participants = [p for p in all_remote_participants 
-                                   if p.kind != "agent" and not p.identity.startswith('agent')]
+        # STRICT MODE: Must send RPC before allowing exit
+        if not self._rpc_sent_successfully:
+            logger.warning("Exit triggered but RPC not yet sent - attempting strict RPC on exit")
+            
+            # Try to send strict RPC on exit
+            rpc_success = await self._send_strict_rpc("agent_disconnected - on_exit")
+            
+            if not rpc_success:
+                logger.warning("Exit RPC failed, attempting force disconnect after timeout")
                 
-                if user_participants:
-                    user_participant = user_participants[0]
-                    user_identity = user_participant.identity
-                    
-                    rpc_payload = {
-                        'reason': 'agent_disconnected',
-                        'timestamp': datetime.utcnow().isoformat(),
-                        'session_id': self.session_id,
-                        'attempt_id': self.attempt_id
-                    }
-                    
-                    try:
-                        await self._ctx.room.local_participant.perform_rpc(
-                            destination_identity=user_identity,
-                            method='forceEndInterview',
-                            payload=json.dumps(rpc_payload),
-                            response_timeout=5.0
-                        )
-                        logger.info(f"Exit RPC sent to frontend to close meeting")
-                    except Exception as rpc_error:
-                        logger.error(f"Exit RPC failed: {rpc_error}")
-                        
-        except Exception as exit_rpc_error:
-            logger.error(f"Error sending exit RPC: {exit_rpc_error}")
+                # Give additional time for any pending operations
+                try:
+                    await asyncio.wait_for(
+                        self._wait_for_rpc_opportunity(),
+                        timeout=self._force_disconnect_timeout
+                    )
+                    # Try one final RPC attempt
+                    rpc_success = await self._send_strict_rpc("agent_disconnected - on_exit - final attempt")
+                except asyncio.TimeoutError:
+                    logger.error(f"Force disconnect timeout ({self._force_disconnect_timeout}s) reached on exit")
+            
+            # Log final RPC status
+            if rpc_success:
+                logger.info("Exit RPC sent successfully")
+            else:
+                logger.error("Exit completed but RPC was never confirmed")
+        else:
+            logger.info("RPC already sent successfully, skipping exit RPC")
+        
+        # Always disconnect from room after RPC attempt
+        if self._ctx and self._ctx.room:
+            try:
+                logger.info("Proceeding with room disconnect on exit")
+                await self._ctx.room.disconnect()
+                logger.info("Exit disconnect completed")
+            except Exception as disconnect_error:
+                logger.error(f"Error in exit disconnect: {disconnect_error}")
+                try:
+                    await self._cleanup_failed_room()
+                except Exception as cleanup_error:
+                    logger.error(f"Exit room cleanup failed: {cleanup_error}")
     
     async def _timeout_handler(self) -> None:
-        """14-minute timeout backup to prevent stuck sessions"""
+        """Timeout handler with connection monitoring to prevent stuck sessions"""
         try:
-            # Wait 14 minutes (840 seconds)
-            await asyncio.sleep(840)
+            # Wait 12 minutes (720 seconds) - reduced from 14 minutes for better UX
+            timeout_duration = 720
+            check_interval = 30  # Check connection every 30 seconds
+            elapsed_time = 0
             
-            logger.info("14-minute timeout reached - auto-ending interview")
-            # Mark as completed due to timeout
+            while elapsed_time < timeout_duration:
+                await asyncio.sleep(check_interval)
+                elapsed_time += check_interval
+                
+                # Check connection health every 30 seconds
+                if self._ctx and self._ctx.room:
+                    try:
+                        if hasattr(self._ctx.room, 'connection_state'):
+                            connection_state = str(self._ctx.room.connection_state)
+                            if connection_state in ['DISCONNECTED', 'FAILED']:
+                                logger.warning(f"Connection lost (state: {connection_state}) - ending interview early")
+                                await mark_interview_completed(self.attempt_id, f"connection lost - {connection_state}")
+                                await self.end_interview(f"connection lost - {connection_state}")
+                                return
+                            elif connection_state == 'RECONNECTING':
+                                logger.info(f"Connection reconnecting at {elapsed_time}s mark")
+                    except Exception as check_error:
+                        logger.warning(f"Connection check failed: {check_error}")
+                
+                # Log progress every 2 minutes
+                if elapsed_time % 120 == 0:
+                    remaining_minutes = (timeout_duration - elapsed_time) // 60
+                    logger.info(f"Interview progress: {elapsed_time//60} minutes elapsed, {remaining_minutes} minutes remaining")
+            
+            # If we reach here, timeout was reached
+            logger.info("12-minute timeout reached - auto-ending interview")
             await mark_interview_completed(self.attempt_id, "timeout - session duration limit reached")
             await self.end_interview("timeout - session duration limit reached")
             
@@ -192,90 +383,104 @@ class SimpleMockInterviewAgent(Agent):
             logger.info("Timeout handler cancelled - session ended naturally")
         except Exception as e:
             logger.error(f"Error in timeout handler: {e}")
+            # Force completion on any error to prevent stuck sessions
+            try:
+                await mark_interview_completed(self.attempt_id, f"timeout handler error - {str(e)}")
+            except:
+                pass
     
     @function_tool()
-    async def end_interview(self, context: RunContext, reason: str = "Interview completed"):
-        """End the interview - brief notification then RPC call to frontend"""
+    async def end_interview(self, context: RunContext = None, reason: str = "Interview completed"):
+        """End the interview - STRICT MODE: Must notify frontend before disconnecting"""
         try:
-            logger.info(f"Ending interview: {reason}")
+            logger.info(f"Ending interview with strict RPC: {reason}")
             
             # Step 1: Mark interview as completed in database
             await mark_interview_completed(self.attempt_id, reason)
             
-            # Step 2: Quick goodbye message  
-            await context.session.generate_reply(
-                instructions=safe_encode_text("Thank you for the interview. The session will end shortly.")
-            )
-            
-            # Step 3: Wait 1 second for message delivery
-            await asyncio.sleep(1)
-            
-            # Step 4: Find THE user participant and call RPC (1 agent + 1 user scenario)
-            try:
-                # Get user participants for RPC call
-                all_remote_participants = list(self._ctx.room.remote_participants.values())
-                user_participants = [p for p in all_remote_participants 
-                                   if p.kind != "agent" and not p.identity.startswith('agent')]
-                
-                if user_participants:
-                    # In 1-agent-1-user scenario, there should be exactly 1 user
-                    user_participant = user_participants[0]
-                    user_identity = user_participant.identity
-                    
-                    logger.info(f"Sending RPC 'forceEndInterview' to user: {user_identity}")
-                    
-                    # Call frontend RPC method 'forceEndInterview'
-                    rpc_payload = {
-                        'reason': safe_encode_text(reason),
-                        'timestamp': datetime.utcnow().isoformat(),
-                        'session_id': self.session_id,
-                        'attempt_id': self.attempt_id
-                    }
-                    try:
-                        response = await self._ctx.room.local_participant.perform_rpc(
-                            destination_identity=user_identity,
-                            method='forceEndInterview',
-                            payload=json.dumps(rpc_payload),
-                            response_timeout=10.0
-                        )
-                        logger.info(f"RPC sent successfully to {user_identity}")
-                    except asyncio.TimeoutError:
-                        logger.error(f"RPC timeout to {user_identity} - frontend may not have registered handler")
-                    except Exception as rpc_call_error:
-                        logger.error(f"RPC call failed: {rpc_call_error}")
-                else:
-                    logger.warning("No user participants found for RPC call")
-            
-            except Exception as rpc_error:
-                logger.error(f"Error in RPC section: {rpc_error}")
-            
-            # Step 5: Always disconnect agent after RPC
-            try:
-                if self._timeout_task and not self._timeout_task.done():
-                    self._timeout_task.cancel()
-                
-                await asyncio.sleep(2)  # Give frontend time to process RPC
-                await self._ctx.room.disconnect()
-                logger.info("Agent disconnected successfully")
-                
-            except Exception as disconnect_error:
-                logger.error(f"Error disconnecting: {disconnect_error}")
+            # Step 2: Quick goodbye message (if context available)
+            if context and hasattr(context, 'session'):
                 try:
-                    if hasattr(context.session, 'close'):
-                        await context.session.close()
-                except Exception as close_error:
-                    logger.error(f"Error closing session: {close_error}")
+                    await context.session.generate_reply(
+                        instructions=safe_encode_text("Thank you for the interview. The session will end shortly.")
+                    )
+                    # Step 3: Wait 1 second for message delivery
+                    await asyncio.sleep(1)
+                except Exception as message_error:
+                    logger.warning(f"Could not send goodbye message: {message_error}")
+            else:
+                logger.info("No context available for goodbye message, proceeding with RPC")
+            
+            # Step 4: Cancel timeout task
+            if self._timeout_task and not self._timeout_task.done():
+                self._timeout_task.cancel()
+            
+            # Step 5: STRICT MODE - Send RPC with confirmation before disconnecting
+            logger.info("Starting strict RPC sequence for interview end")
+            rpc_success = await self._send_strict_rpc(reason)
+            
+            if not rpc_success:
+                logger.warning("Strict RPC failed during interview end, attempting force disconnect")
+                
+                # Give additional time for any pending operations
+                try:
+                    await asyncio.wait_for(
+                        self._wait_for_rpc_opportunity(),
+                        timeout=self._force_disconnect_timeout
+                    )
+                    # Try one final RPC attempt
+                    rpc_success = await self._send_strict_rpc(reason + " - final attempt")
+                except asyncio.TimeoutError:
+                    logger.error(f"Force disconnect timeout ({self._force_disconnect_timeout}s) reached during interview end")
+            
+            # Step 6: Actually disconnect from room
+            if self._ctx and self._ctx.room:
+                try:
+                    # Give frontend brief moment to process RPC
+                    await asyncio.sleep(1.5)
+                    
+                    logger.info("Proceeding with room disconnect after strict RPC")
+                    await self._ctx.room.disconnect()
+                    logger.info("Successfully disconnected from room")
+                except Exception as disconnect_error:
+                    logger.error(f"Error during room disconnect: {disconnect_error}")
+                    # Try room cleanup
+                    try:
+                        await self._cleanup_failed_room()
+                    except Exception as cleanup_error:
+                        logger.error(f"Room cleanup also failed: {cleanup_error}")
+            
+            # Step 7: Log final RPC status
+            if rpc_success:
+                logger.info("Interview ended successfully with strict RPC confirmation")
+            else:
+                logger.error("Interview ended but strict RPC was never confirmed")
         
         except Exception as e:
             logger.error(f"Error ending interview: {e}")
-            # Fallback: force disconnect
+            # Fallback: try one more strict RPC, then force disconnect
             try:
+                logger.warning("Attempting emergency strict RPC due to interview end error")
+                emergency_success = await self._send_strict_rpc(f"emergency end - {str(e)}")
+                
+                if not emergency_success:
+                    logger.error("Emergency strict RPC also failed")
+                
+                # Force disconnect regardless
                 if self._ctx and hasattr(self._ctx, 'room'):
                     await self._ctx.room.disconnect()
-                elif hasattr(context, 'session') and hasattr(context.session, 'close'):
+                    logger.info("Emergency disconnect completed")
+                elif context and hasattr(context, 'session') and hasattr(context.session, 'close'):
                     await context.session.close()
-            except Exception as fallback_error:
-                logger.error(f"Fallback disconnect failed: {fallback_error}")
+                    logger.info("Emergency session close completed")
+                    
+            except Exception as emergency_error:
+                logger.error(f"Emergency disconnect failed: {emergency_error}")
+                # Final attempt at cleanup
+                try:
+                    await self._cleanup_failed_room()
+                except:
+                    pass
 
 
 async def get_agent_prompt_from_db(room_name: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
