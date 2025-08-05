@@ -66,7 +66,6 @@ from livekit.agents import (
 )
 from livekit.plugins.openai import realtime
 from livekit.plugins import silero
-from livekit.plugins.turn_detector.english import EnglishModel
 from livekit.plugins.openai import stt as openai_stt
 
 # Configure logging for production with UTF-8 support
