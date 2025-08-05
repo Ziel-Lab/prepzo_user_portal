@@ -1,14 +1,8 @@
 import sys
 import logging
 from supabase import create_client, ClientOptions
+from livekit import api
 
-# LiveKit imports - using the correct modern API
-try:
-    from livekit import api
-    LIVEKIT_AVAILABLE = True
-except ImportError:
-    api = None
-    LIVEKIT_AVAILABLE = False
 
 # Dual Supabase client architecture
 supabase_admin = None  # Service role key - for admin operations
@@ -72,9 +66,6 @@ def init_supabase(app):
             logger.error("FATAL: Neither Supabase client could be initialized.")
             return
 
-        logger.info("Dual Supabase architecture initialized successfully")
-        logger.info("   - Admin operations: service role key (bypasses RLS)")
-        logger.info("   - User operations: anon key + JWT (enforces RLS)")
 
     except Exception as e:
         logger.error(f"FATAL: Supabase initialization error: {e}", exc_info=True)
@@ -124,12 +115,6 @@ def get_admin_client():
 def init_livekit(app):
     """Initialize LiveKit client for interview functionality"""
     global livekit_client
-    logger = app.logger if hasattr(app, "logger") else logging.getLogger("livekit")
-    
-    if not LIVEKIT_AVAILABLE:
-        logger.warning("LiveKit not available. Mock interview features will be disabled.")
-        livekit_client = None
-        return
     
     api_key = app.config.get('LIVEKIT_API_KEY')
     api_secret = app.config.get('LIVEKIT_API_SECRET')
@@ -145,15 +130,10 @@ def init_livekit(app):
         from livekit.api import RoomService
         livekit_client = RoomService(livekit_url, api_key, api_secret)
         app.config['LIVEKIT_CONFIGURED'] = True
-        logger.info("LiveKit RoomService client initialized successfully.")
     except ImportError:
-        # Fallback if RoomService not available
-        logger.warning("LiveKit RoomService not available. Using credential-only configuration.")
         livekit_client = None
         app.config['LIVEKIT_CONFIGURED'] = True
-        logger.info("LiveKit credentials configured successfully.")
     except Exception as e:
-        logger.error(f"LiveKit initialization error: {e}", exc_info=True)
         livekit_client = None
         
     app.extensions["livekit"] = livekit_client or True
