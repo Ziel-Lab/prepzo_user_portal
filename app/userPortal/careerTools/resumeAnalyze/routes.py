@@ -248,6 +248,22 @@ def roast_resume():
         except Exception as e:
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
 
+        # Trigger n8n workflow for resume roast (non-blocking)
+        webhook_url = "https://prepzo.app.n8n.cloud/webhook-test/prod_resume_roast"
+        try:
+            requests.post(
+                webhook_url,
+                json={
+                    "job_id": job_id,
+                    "resume_url": resume_url_for_xano,
+                    "user_id": current_user_id,
+                    "resume_id": resume_id_from_db
+                },
+                timeout=2
+            )
+        except requests.exceptions.RequestException as req_err:
+            current_app.logger.warning(f"n8n webhook call failed (non-blocking): {req_err}")
+
         return (
             jsonify(
                 {
@@ -266,10 +282,10 @@ def roast_resume():
             error_detail = http_err.response.json()
         except ValueError: 
             error_detail = str(http_err.response.text)
-        return jsonify({"error": "Xano API request failed", "details": error_detail}), http_err.response.status_code
+        return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
-        logging.error(f"Request to Xano API failed: {str(req_err)}")
-        return jsonify({"error": "Request to Xano API failed", "details": str(req_err)}), 500
+        logging.error(f"Request to n8n API failed: {str(req_err)}")
+        return jsonify({"error": "Request to n8n API failed", "details": str(req_err)}), 500
     except Exception as e:
         current_app.logger.error(f"Unexpected error in roast_resume: {str(e)}")
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
