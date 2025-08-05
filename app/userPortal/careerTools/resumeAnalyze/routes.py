@@ -5,6 +5,7 @@ import magic
 import json
 import logging
 import time
+import uuid
 from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import resume_analyze_event
@@ -35,6 +36,7 @@ def analyze_resume():
         job_description = data.get("job_description")
         company_website = data.get("company_website")
         additional_comment_text = data.get("additional_comments") 
+        job_id = str(uuid.uuid4())
 
         if not all([current_resume_url, job_description]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
@@ -47,6 +49,7 @@ def analyze_resume():
             "additional_comments": additional_comment_text,
             "user_id": current_user_id,
             "user_name": user_name,
+            "job_id": job_id,
         }
 
         # Remove None values
