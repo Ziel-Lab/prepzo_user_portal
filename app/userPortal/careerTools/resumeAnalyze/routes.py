@@ -306,7 +306,7 @@ def get_roast_resume():
             extensions.supabase.table("analyze_resume")
             .select("*")
             .eq("user_id", current_user_id)
-            .eq("additional_comment", "Resume Roast Feedback")
+            .eq("additional_comment", "Resume Roast")
             .order("created_at", desc=True)
         )
 
