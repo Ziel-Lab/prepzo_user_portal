@@ -222,11 +222,9 @@ def create_interview_session():
     try:
         data = request.get_json()
         
-        # EMERGENCY DEBUG - This will definitely show up
-        logger.info("EMERGENCY DEBUG - RAW REQUEST DATA:")
-        logger.info(str(data))
+
         
-        # Check user's session limits before creating
+        # Get user's plan information
         admin_client = get_admin_client()
         user_id = g.user.id
         
@@ -241,8 +239,7 @@ def create_interview_session():
             default_usage = {
                 'user_id': user_id,
                 'plan_id': 1,  # Default to free plan
-                'mock_interview_session_lifetime_count': 0,
-                'mock_interview_attempt_lifetime_count': 0
+                'mock_interview_session_lifetime_count': 0
             }
             admin_client.table('feature_usage').insert(default_usage).execute()
             usage_data = default_usage
@@ -261,18 +258,23 @@ def create_interview_session():
         
         if plan_result.data:
             session_limit = plan_result.data[0].get('mock_interview_session', 0)
-            
-            # Check if user has reached their limit
-            if session_limit is not None and session_limit > 0 and current_sessions >= session_limit:
-                return jsonify({
-                    'error': f'You have reached your session limit ({current_sessions}/{session_limit}). Please upgrade your plan.',
-                    'limit_reached': True,
-                    'current_count': current_sessions,
-                    'limit': session_limit
-                }), 403
         else:
-            # Default limits if plan not found
-            session_limit = 0
+            # Exact limits for each plan_id if plan not found in database
+            if plan_id == 1:
+                session_limit = 0  # Free plan: 0 sessions
+            elif plan_id == 2:
+                session_limit = 3  # Pro plan: 3 sessions
+            elif plan_id == 3:
+                session_limit = 999999999  # Premium plan: unlimited sessions
+            else:
+                session_limit = 0  # Unknown plan: no sessions
+        
+        # Check if plan has unlimited sessions (only >1000 sessions counts as unlimited)
+        is_unlimited = session_limit is not None and session_limit > 1000
+        
+        # No special handling - use exact database values for all plans
+        
+        # Allow all users to create sessions regardless of plan limits
         
         # Basic interview parameters - extract from request data
         interview_type = data.get('type') or data.get('interview_type', 'behavioral')
@@ -710,22 +712,7 @@ def join_interview_session(session_id):
         else:
             logger.error(f"Failed to set started_at for attempt {attempt_result.data[0]['id']}")
         
-        # Update attempt counter in feature_usage
-        try:
-            # First get current count
-            usage_result = admin_client.table('feature_usage')\
-                .select('mock_interview_attempt_lifetime_count')\
-                .eq('user_id', g.user.id)\
-                .execute()
-            
-            if usage_result.data:
-                current_attempts = usage_result.data[0].get('mock_interview_attempt_lifetime_count', 0)
-                admin_client.table('feature_usage')\
-                    .update({'mock_interview_attempt_lifetime_count': current_attempts + 1})\
-                    .eq('user_id', g.user.id)\
-                    .execute()
-        except Exception as counter_error:
-            logger.warning(f"Failed to update attempt counter: {counter_error}")
+        # Note: Attempt counter tracking removed since column doesn't exist in database
         
         # Update session object with new status and compute display status
         session['status'] = 'active'
@@ -821,6 +808,7 @@ def get_session_data(session_id):
         logger.error(f"Error fetching session data: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
+
 @mock_interview_bp.route('/user-limits', methods=['GET'])
 @require_authentication
 def get_user_mock_interview_limits():
@@ -831,7 +819,7 @@ def get_user_mock_interview_limits():
         
         # Get user's current plan and usage from feature_usage table
         usage_result = admin_client.table('feature_usage')\
-            .select('plan_id, mock_interview_session_lifetime_count, mock_interview_attempt_lifetime_count')\
+            .select('plan_id, mock_interview_session_lifetime_count')\
             .eq('user_id', user_id)\
             .execute()
         
@@ -840,8 +828,7 @@ def get_user_mock_interview_limits():
             default_usage = {
                 'user_id': user_id,
                 'plan_id': 1,  # Default to free plan
-                'mock_interview_session_lifetime_count': 0,
-                'mock_interview_attempt_lifetime_count': 0
+                'mock_interview_session_lifetime_count': 0
             }
             admin_client.table('feature_usage').insert(default_usage).execute()
             usage_data = default_usage
@@ -858,7 +845,15 @@ def get_user_mock_interview_limits():
         
         if not plan_result.data:
             logger.warning(f"No subscription plan found for plan_id {plan_id}")
-            plan_limits = {'mock_interview_session': 0, 'mock_interview_attempts': 3}
+            # Exact limits for each plan_id if plan not found in database
+            if plan_id == 1:
+                plan_limits = {'mock_interview_session': 0, 'mock_interview_attempts': 0}  # Free plan
+            elif plan_id == 2:
+                plan_limits = {'mock_interview_session': 3, 'mock_interview_attempts': 3}  # Pro plan
+            elif plan_id == 3:
+                plan_limits = {'mock_interview_session': 999999999, 'mock_interview_attempts': 3}  # Premium plan
+            else:
+                plan_limits = {'mock_interview_session': 0, 'mock_interview_attempts': 0}  # Unknown plan
         else:
             plan_limits = plan_result.data[0]
         
@@ -870,27 +865,24 @@ def get_user_mock_interview_limits():
         
         current_sessions = len(sessions_result.data) if sessions_result.data else 0
         
+        # Determine if plan has unlimited sessions (only >1000 sessions counts as unlimited)
+        session_limit = plan_limits.get('mock_interview_session', 0)
+        is_unlimited = session_limit is not None and session_limit > 1000
+        
         # Prepare response
         response_data = {
             'plan_id': plan_id,
-            'session_limit': plan_limits.get('mock_interview_session', 0),
+            'session_limit': session_limit if not is_unlimited else None,
             'sessions_used': current_sessions,
-            'sessions_remaining': max(0, (plan_limits.get('mock_interview_session', 0) or 999999) - current_sessions),
+            'sessions_remaining': 999999999 if is_unlimited else max(0, session_limit - current_sessions),
             'attempts_per_session': plan_limits.get('mock_interview_attempts', 3),
-            'is_unlimited_sessions': plan_limits.get('mock_interview_session') is None or plan_limits.get('mock_interview_session') == 0,
-            'can_create_session': (
-                plan_limits.get('mock_interview_session') is None or  # Unlimited
-                plan_limits.get('mock_interview_session') == 0 or     # Free plan (no sessions)
-                current_sessions < plan_limits.get('mock_interview_session', 0)
-            ),
+            'is_unlimited_sessions': is_unlimited,
+            'can_create_session': True,  # Always allow session creation
             'plan_name': 'Free' if plan_id == 1 else ('Pro' if plan_id == 2 else 'Premium')
         }
         
-        # Special handling for free plan (plan_id 1)
-        if plan_id == 1:
-            response_data['can_create_session'] = False
-            response_data['session_limit'] = 0
-            response_data['sessions_remaining'] = 0
+        # Always allow session creation - button always appears
+        response_data['can_create_session'] = True
         
         return jsonify(response_data), 200
         
@@ -1250,6 +1242,50 @@ def get_session_attempts(session_id):
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@mock_interview_bp.route('/attempt/<attempt_id>', methods=['GET'])
+@require_authentication
+def get_attempt_data(attempt_id):
+    """Get attempt data by attempt ID"""
+    try:
+        admin_client = get_admin_client()
+        
+        # Get attempt data with session info
+        attempt_result = admin_client.table('mock_interview_attempts')\
+            .select('*, mock_interview!inner(user_id, title, interview_type, position, company_name)')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not attempt_result.data:
+            return jsonify({'error': 'Attempt not found'}), 404
+        
+        attempt = attempt_result.data[0]
+        
+        # Verify user owns this attempt
+        if attempt['mock_interview']['user_id'] != g.user.id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Enhance attempt data for frontend
+        enhanced_attempt = {
+            **attempt,
+            'has_feedback': bool(attempt.get('feedback')),
+            'has_transcript': bool(attempt.get('transcript')),
+            'has_live_transcription': bool(attempt.get('live_transcription')),
+            'is_completed': attempt.get('status') in ['completed', 'COMPLETED', 'PROCESSED'],
+            'is_processed': attempt.get('status') == 'PROCESSED',
+            'can_view_feedback': attempt.get('status') in ['COMPLETED', 'PROCESSED'] and bool(attempt.get('feedback')),
+            'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
+            'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending'
+        }
+        
+        return jsonify({
+            'attempt': enhanced_attempt,
+            'session_info': attempt['mock_interview']
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting attempt data: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 @mock_interview_bp.route('/attempt/<attempt_id>/save-transcription', methods=['POST'])
 @require_authentication
 def save_attempt_transcription(attempt_id):
@@ -1339,6 +1375,154 @@ def save_attempt_transcription(attempt_id):
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return jsonify({'error': 'Internal server error'}), 500
 
+@mock_interview_bp.route('/attempt/<attempt_id>/subscribe', methods=['GET'])
+@require_authentication
+def subscribe_to_attempt_updates(attempt_id):
+    """Get subscription configuration for real-time attempt updates"""
+    try:
+        admin_client = get_admin_client()
+        
+        # Verify attempt exists and user owns it
+        attempt_result = admin_client.table('mock_interview_attempts')\
+            .select('id, mock_interview!inner(user_id)')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not attempt_result.data:
+            return jsonify({'error': 'Attempt not found'}), 404
+        
+        attempt = attempt_result.data[0]
+        
+        if attempt['mock_interview']['user_id'] != g.user.id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Return subscription configuration for frontend
+        return jsonify({
+            'subscription_config': {
+                'channel_name': f'attempt-updates-{attempt_id}',
+                'table': 'mock_interview_attempts',
+                'filter': f'id=eq.{attempt_id}',
+                'events': ['UPDATE'],
+                'watch_columns': ['status', 'feedback', 'evaluation_score'],
+                'target_status': 'PROCESSED',
+                'attempt_id': attempt_id
+            },
+            'supabase_config': {
+                'url': current_app.config.get('SUPABASE_URL'),
+                'anon_key': current_app.config.get('SUPABASE_ANON_KEY')
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error setting up attempt subscription: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@mock_interview_bp.route('/attempts/realtime-token', methods=['POST'])
+@require_authentication  
+def get_realtime_token():
+    """Get a token for real-time subscriptions (if needed for authenticated channels)"""
+    try:
+        # For now, return the user's JWT token for authenticated real-time channels
+        # In production, you might want to generate a specific real-time token
+        
+        return jsonify({
+            'token': request.headers.get('Authorization', '').replace('Bearer ', ''),
+            'user_id': g.user.id,
+            'expires_in': 3600  # 1 hour
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error generating realtime token: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+def extract_score_from_feedback(feedback_json):
+    """Extract numeric score from feedback JSON"""
+    try:
+        if isinstance(feedback_json, str):
+            feedback_data = json.loads(feedback_json)
+        else:
+            feedback_data = feedback_json
+            
+        # Get score field (e.g., "2/10", "7/10", etc.)
+        score_text = feedback_data.get('Score', '')
+        
+        if score_text:
+            # Extract number before "/" (e.g., "2" from "2/10")
+            score_parts = score_text.split('/')
+            if score_parts and score_parts[0].strip().isdigit():
+                return int(score_parts[0].strip())
+                
+        return None
+    except Exception as e:
+        logger.warning(f"Error extracting score from feedback: {str(e)}")
+        return None
+
+@mock_interview_bp.route('/attempt/<attempt_id>/process-feedback', methods=['POST'])
+@require_authentication
+def process_feedback(attempt_id):
+    """Process and store feedback with extracted score"""
+    try:
+        data = request.get_json()
+        feedback = data.get('feedback', {})
+        
+        if not feedback:
+            return jsonify({'error': 'Feedback data is required'}), 400
+        
+        admin_client = get_admin_client()
+        
+        # Verify attempt exists and user owns it
+        attempt_result = admin_client.table('mock_interview_attempts')\
+            .select('id, status, mock_interview!inner(user_id)')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not attempt_result.data:
+            return jsonify({'error': 'Attempt not found'}), 404
+        
+        attempt = attempt_result.data[0]
+        
+        if attempt['mock_interview']['user_id'] != g.user.id:
+            return jsonify({'error': 'Access denied'}), 403
+        
+        # Extract score from feedback
+        evaluation_score = extract_score_from_feedback(feedback)
+        
+        # Update attempt with feedback and extracted score
+        update_data = {
+            'feedback': json.dumps(feedback),
+            'status': 'PROCESSED',
+            'updated_at': 'now()'
+        }
+        
+        # Add evaluation score if successfully extracted
+        if evaluation_score is not None:
+            update_data['evaluation_score'] = evaluation_score
+            logger.info(f"Extracted score {evaluation_score} from feedback for attempt {attempt_id}")
+        else:
+            logger.warning(f"Could not extract score from feedback for attempt {attempt_id}")
+        
+        update_result = admin_client.table('mock_interview_attempts')\
+            .update(update_data)\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if update_result.data:
+            processed_attempt = update_result.data[0]
+            logger.info(f"Processed feedback for attempt {attempt_id} with score {evaluation_score}")
+            
+            return jsonify({
+                'message': 'Feedback processed successfully',
+                'attempt': processed_attempt,
+                'evaluation_score': evaluation_score,
+                'status': 'PROCESSED'
+            }), 200
+        else:
+            return jsonify({'error': 'Failed to process feedback'}), 500
+        
+    except Exception as e:
+        logger.error(f"Error processing feedback: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 @mock_interview_bp.route('/attempt/<attempt_id>/complete', methods=['POST'])
 @require_authentication
 def complete_attempt(attempt_id):
@@ -1348,6 +1532,7 @@ def complete_attempt(attempt_id):
         transcript = data.get('transcript', {})
         live_transcription = data.get('live_transcription', {})
         actual_duration_minutes = data.get('actual_duration_minutes', 0)
+        feedback = data.get('feedback', {})  # Optional feedback in completion
         
         admin_client = get_admin_client()
         
@@ -1397,6 +1582,16 @@ def complete_attempt(attempt_id):
         if live_transcription:
             update_data['live_transcription'] = json.dumps(live_transcription)
         
+        # Handle feedback if provided in completion (immediate processing)
+        if feedback:
+            evaluation_score = extract_score_from_feedback(feedback)
+            update_data['feedback'] = json.dumps(feedback)
+            update_data['status'] = 'PROCESSED'  # Mark as processed if feedback included
+            
+            if evaluation_score is not None:
+                update_data['evaluation_score'] = evaluation_score
+                logger.info(f"Extracted score {evaluation_score} from feedback for attempt {attempt_id}")
+        
         update_result = admin_client.table('mock_interview_attempts')\
             .update(update_data)\
             .eq('id', attempt_id)\
@@ -1404,15 +1599,23 @@ def complete_attempt(attempt_id):
         
         if update_result.data:
             completed_attempt = update_result.data[0]
-            logger.info(f"Completed attempt {attempt_id} with {actual_duration_minutes} minutes duration")
+            status = 'PROCESSED' if feedback else 'completed'
+            logger.info(f"Completed attempt {attempt_id} with {actual_duration_minutes} minutes duration, status: {status}")
             
-            return jsonify({
+            response_data = {
                 'message': 'Attempt completed successfully',
                 'attempt': completed_attempt,
-                'status': 'completed',
-                'actual_duration_minutes': actual_duration_minutes,
-                'processing_message': 'Your interview will be analyzed and feedback will be available soon.'
-            }), 200
+                'status': status,
+                'actual_duration_minutes': actual_duration_minutes
+            }
+            
+            if feedback:
+                response_data['evaluation_score'] = update_data.get('evaluation_score')
+                response_data['processing_message'] = 'Interview completed and feedback processed!'
+            else:
+                response_data['processing_message'] = 'Your interview will be analyzed and feedback will be available soon.'
+            
+            return jsonify(response_data), 200
         else:
             return jsonify({'error': 'Failed to complete attempt'}), 500
         

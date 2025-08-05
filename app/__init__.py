@@ -20,6 +20,9 @@ from .userPortal.profile import profile_bp
 def create_app():
     app = Flask(__name__)
 
+    # Reject extremely large request bodies early (e.g. huge file uploads)
+    app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB
+
     secret_name = "userPortal-dev"
     region_name = "us-east-1"
     secrets = get_secret(secret_name, region_name)
@@ -44,6 +47,13 @@ def create_app():
 
     init_supabase(app)  # Initializes Supabase client with app config
     init_livekit(app)   # Initializes LiveKit client with app config
+    
+    # Validate Supabase hook configuration from AWS Secrets Manager
+    from .auth.routes import validate_hook_configuration
+    if not validate_hook_configuration(app):
+        app.logger.error("FATAL: Supabase hook configuration validation failed - app may not start properly")
+        # Note: In production, you might want to raise an exception here to prevent startup
+        # raise RuntimeError("Invalid Supabase hook configuration")
 
     @app.after_request
     def after_request_func(response):
@@ -103,8 +113,17 @@ def create_app():
     app.register_blueprint(cover_letter_bp)
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
-    app.register_blueprint(mock_interview_bp)
     app.register_blueprint(profile_bp)
     app.register_blueprint(mock_interview_bp)
+
+    # Fallback route for auth hook without /auth prefix (compatibility)
+    @app.route('/custom-access-token-hook', methods=['POST'])
+    def custom_access_token_hook_fallback():
+        """
+        Fallback route for custom access token hook without /auth prefix
+        Routes to the auth blueprint implementation
+        """
+        from .auth.routes import custom_access_token_hook
+        return custom_access_token_hook()
 
     return app
