@@ -31,7 +31,7 @@ def validate_hook_configuration(app):
     try:
         version, secret_part = webhook_secret.split(',', 1)
         base64.b64decode(secret_part[6:])  # Test decode
-        app.logger.info("✓ SUPABASE_HOOK_SECRET successfully loaded from AWS Secrets Manager and validated")
+        app.logger.info("[OK] SUPABASE_HOOK_SECRET successfully loaded from AWS Secrets Manager and validated")
         return True
     except Exception as e:
         app.logger.error(f"CRITICAL: Failed to decode SUPABASE_HOOK_SECRET from AWS Secrets Manager: {e}")
@@ -103,6 +103,24 @@ def get_token_info():
         'token_info': token_info,
         'message': 'Token information retrieved successfully'
     }), 200
+
+@auth_bp.route('/realtime-token', methods=['POST'])
+@require_authentication  
+def get_realtime_token():
+    """Get a token for real-time subscriptions (if needed for authenticated channels)"""
+    try:
+        # For now, return the user's JWT token for authenticated real-time channels
+        # In production, you might want to generate a specific real-time token
+        
+        return jsonify({
+            'token': request.headers.get('Authorization', '').replace('Bearer ', ''),
+            'user_id': g.user.id,
+            'expires_in': 3600  # 1 hour
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error generating realtime token: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 @auth_bp.route('/custom-access-token-hook', methods=['POST'])
 def custom_access_token_hook():
