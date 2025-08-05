@@ -249,7 +249,7 @@ def roast_resume():
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
 
         # Trigger n8n workflow for resume roast (non-blocking)
-        webhook_url = "https://prepzo.app.n8n.cloud/webhook-test/prod_resume_roast"
+        webhook_url = "https://prepzo.app.n8n.cloud/webhook/prod_resume_roast"
         try:
             requests.post(
                 webhook_url,
