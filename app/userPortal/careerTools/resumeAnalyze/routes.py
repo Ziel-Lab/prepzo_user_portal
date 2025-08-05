@@ -72,14 +72,15 @@ def analyze_resume():
 
         # Call the n8n webhook
         n8n_url = "https://prepzo.app.n8n.cloud/webhook/prod_resume_analyzer"
-        n8n_response = requests.post(n8n_url, json=n8n_payload, timeout=30)
+        # n8n_response = requests.post(n8n_url, json=n8n_payload, timeout=30)
 
-        if n8n_response.status_code != 200:
-            return jsonify({"error": "Resume analysis service failed", "details": n8n_response.text}), n8n_response.status_code
+        # if n8n_response.status_code != 200:
+        #     return jsonify({"error": "Resume analysis service failed", "details": n8n_response.text}), n8n_response.status_code
 
         # Return the response from n8n (assumes JSON)
         try:
-            return jsonify(n8n_response.json()), 200
+            # return jsonify(n8n_response.json()), 200
+            return jsonify({"message": "Resume analysis request accepted"}), 200
         except ValueError:
             # Fallback if response isn't JSON
             return jsonify({"message": "Resume analysis request accepted"}), 200
