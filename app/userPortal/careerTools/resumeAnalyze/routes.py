@@ -14,6 +14,7 @@ import tempfile
 import os
 import subprocess
 from flask import send_file
+import jinja2
 
 
 def background_db_and_analytics(db_payload):
@@ -335,6 +336,26 @@ def markdown_to_pdf(markdown_content, template_path):
             raise RuntimeError(f"Pandoc PDF generation failed: {e}")
         return pdf_path
 
+def render_resume_latex(data, template_path):
+    with open(template_path, "r", encoding="utf-8") as f:
+        template_str = f.read()
+    template = jinja2.Template(template_str)
+    return template.render(**data)
+
+def latex_to_pdf(latex_content):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tex_path = os.path.join(tmpdir, "resume.tex")
+        pdf_path = os.path.join(tmpdir, "resume.pdf")
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(latex_content)
+        try:
+            subprocess.run([
+                "pdflatex", "-interaction=nonstopmode", tex_path
+            ], cwd=tmpdir, check=True)
+        except Exception as e:
+            raise RuntimeError(f"LaTeX PDF generation failed: {e}")
+        return pdf_path
+
 @resume_analyze_bp.route("/download-resume-pdf", methods=["GET"])
 @require_authentication
 def download_resume_pdf():
@@ -351,32 +372,34 @@ def download_resume_pdf():
         )
         result_data = getattr(query_response, "data", query_response)
         if not result_data or not isinstance(result_data, list) or not result_data[0].get("feedback_analysis"):
-            return jsonify({"error": "No resume markdown found for this user."}), 404
+            return jsonify({"error": "No resume data found for this user."}), 404
         feedback_analysis = result_data[0]["feedback_analysis"]
         job_id = result_data[0].get("job_id", "latest")
         if isinstance(feedback_analysis, str):
             import json as _json
             feedback_analysis = _json.loads(feedback_analysis)
-        markdown_content = feedback_analysis.get("new_resume", {}).get("new_resume")
-        if not markdown_content:
-            return jsonify({"error": "No markdown resume found in feedback_analysis."}), 404
-        # Use the provided LaTeX template
+        resume_data = feedback_analysis.get("new_resume", {})  # or adjust as per your JSON structure
+
+        # Prepare skills as comma-separated strings if needed
+        skills = resume_data.get("skills", {})
+        for key in ["tools", "libraries"]:
+            if isinstance(skills.get(key), list):
+                skills[key] = ", ".join(skills[key])
+        resume_data["skills"] = skills
+
+        # Render LaTeX
         template_path = os.path.join(os.path.dirname(__file__), "templates", "resume.tex")
         if not os.path.exists(template_path):
             return jsonify({"error": "LaTeX template not found."}), 500
-        # Define unique file path in bucket
+        latex_content = render_resume_latex(resume_data, template_path)
+
+        # Compile to PDF
+        pdf_path = latex_to_pdf(latex_content)
+
+        # Upload to Supabase
         bucket_name = "user-documents"
         pdf_filename = f"{current_user_id}/{job_id}_resume.pdf"
-        # Check if file already exists in Supabase bucket
         storage = extensions.supabase.storage.from_(bucket_name)
-        public_url = storage.get_public_url(pdf_filename)
-        # Try to fetch the file to see if it exists (Supabase returns a URL even if file doesn't exist, so we check with a HEAD request)
-        import requests
-        head_resp = requests.head(public_url)
-        if head_resp.status_code == 200:
-            return jsonify({"pdf_url": public_url}), 200
-        # If not, generate and upload
-        pdf_path = markdown_to_pdf(markdown_content, template_path)
         with open(pdf_path, "rb") as f:
             storage.upload(pdf_filename, f.read(), file_options={"content-type": "application/pdf"})
         public_url = storage.get_public_url(pdf_filename)
