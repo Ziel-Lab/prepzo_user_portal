@@ -7,16 +7,6 @@ COPY requirements.txt .
 
 
 RUN pip install --no-cache-dir -r requirements.txt
-RUN apt-get update && \
-    apt-get install -y wget && \
-    wget https://github.com/jgm/pandoc/releases/download/3.2/pandoc-3.2-1-amd64.deb && \
-    dpkg -i pandoc-3.2-1-amd64.deb && \
-    rm pandoc-3.2-1-amd64.deb
-
-RUN apt-get update && \
-    apt-get install -y texlive-latex-base texlive-fonts-recommended texlive-fonts-extra texlive-latex-extra && \
-    apt-get clean
-
 # Copy only the download script first
 COPY download_models.py .
 
