@@ -23,7 +23,7 @@ def create_app():
     # Reject extremely large request bodies early (e.g. huge file uploads)
     app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5 MB
 
-    secret_name = "userPortal"
+    secret_name = "userPortal-dev"
     region_name = "us-east-1"
     secrets = get_secret(secret_name, region_name)
     if secrets:
@@ -39,7 +39,7 @@ def create_app():
 
     # Logging setup
     app.logger.handlers.clear()
-    app.logger.setLevel(logging.INFO) 
+    app.logger.setLevel(logging.DEBUG)  # Enable debug logging to see webhook signature details 
     stream_handler = logging.StreamHandler(sys.stdout) 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     stream_handler.setFormatter(formatter)

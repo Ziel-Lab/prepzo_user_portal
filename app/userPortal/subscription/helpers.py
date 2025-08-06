@@ -81,10 +81,8 @@ def require_authentication(f):
             # Set JWT token on user client for RLS context
             # This ensures all subsequent operations are scoped to this user
             try:
-                user_client.auth.set_session(
-                    access_token=jwt_token,
-                    refresh_token=None  # We only need the access token for RLS
-                )
+                # Set the auth header directly for RLS context
+                user_client.auth._headers["Authorization"] = f"Bearer {jwt_token}"
             except Exception as e:
                 current_app.logger.warning(f"Failed to set user client session: {e}")
             
