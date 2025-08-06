@@ -80,10 +80,10 @@ def analyze_resume():
         # Return the response from n8n (assumes JSON)
         try:
             # return jsonify(n8n_response.json()), 200
-            return jsonify({"message": "Resume analysis request accepted"}), 200
+            return jsonify({"message": "Resume analysis request accepted", "job_id": job_id}), 202
         except ValueError:
             # Fallback if response isn't JSON
-            return jsonify({"message": "Resume analysis request accepted"}), 200
+            return jsonify({"message": "Resume analysis request accepted", "job_id": job_id}), 202
 
     except requests.exceptions.Timeout:
         logging.error("Resume analysis request timed out")
@@ -106,6 +106,7 @@ def get_analyze_resume():
                 extensions.supabase.table("analyze_resume")
                 .select("*")
                 .eq("user_id", current_user_id)
+                .eq("job_id", job_id_param)
                 .order("created_at", desc=True)
                 .execute()
             )
