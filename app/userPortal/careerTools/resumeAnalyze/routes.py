@@ -241,21 +241,6 @@ def roast_resume():
         except Exception as e:
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
 
-        # Trigger n8n workflow for resume roast (non-blocking)
-        # webhook_url = "https://prepzo.app.n8n.cloud/webhook/prod_resume_roast"
-        # try:
-        #     requests.post(
-        #         webhook_url,
-        #         json={
-        #             "job_id": job_id,
-        #             "resume_url": resume_url_for_xano,
-        #             "user_id": current_user_id,
-        #             "resume_id": resume_id_from_db
-        #         },
-        #         timeout=2
-        #     )
-        # except requests.exceptions.RequestException as req_err:
-        #     current_app.logger.warning(f"n8n webhook call failed (non-blocking): {req_err}")
         
         return (
             jsonify(
@@ -289,11 +274,11 @@ def roast_resume():
 def get_roast_resume():
     """
     Retrieve resume roast feedback for the authenticated user.
-    Optionally accepts an `id` query param to fetch a specific record.
+    Optionally accepts a `job_id` query param to fetch a specific record.
     """
     current_user_id = str(g.user.id)
     try:
-        record_id_param = request.args.get("id")
+        job_id_param = request.args.get("job_id")
 
         query = (
             extensions.supabase.table("analyze_resume")
@@ -303,8 +288,8 @@ def get_roast_resume():
             .order("created_at", desc=True)
         )
 
-        if record_id_param:
-            query = query.eq("id", record_id_param)
+        if job_id_param:
+            query = query.eq("job_id", job_id_param)
 
         query_response = query.execute()
 
