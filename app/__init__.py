@@ -39,7 +39,7 @@ def create_app():
 
     # Logging setup
     app.logger.handlers.clear()
-    app.logger.setLevel(logging.INFO) 
+    app.logger.setLevel(logging.DEBUG)  # Enable debug logging to see webhook signature details 
     stream_handler = logging.StreamHandler(sys.stdout) 
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     stream_handler.setFormatter(formatter)

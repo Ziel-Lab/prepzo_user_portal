@@ -91,7 +91,7 @@ def get_user_client(jwt_token=None):
         # Set the JWT token for RLS context
         # This ensures the user can only access their own data
         try:
-            supabase_user.auth.set_session_from_token(jwt_token)
+            supabase_user.auth._headers["Authorization"] = f"Bearer {jwt_token}"
         except Exception as e:
             logging.warning(f"Failed to set JWT session: {e}")
     

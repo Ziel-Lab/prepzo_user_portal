@@ -260,11 +260,20 @@ def roast_resume():
         logging.error("Resume roast request timed out")
         return jsonify({"error": "The resume roast service is taking too long to respond. Please try again later."}), 504
     except requests.exceptions.HTTPError as http_err:
+        # Log the downstream error but keep our API contract: always 202 Accepted once the job is queued.
         try:
             error_detail = http_err.response.json()
-        except ValueError: 
+        except ValueError:
             error_detail = str(http_err.response.text)
-        return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
+        current_app.logger.warning(
+            "Resume roast: downstream service returned HTTPError – proceeding as queued: %s", error_detail
+        )
+        return jsonify({
+            "job_id": job_id if 'job_id' in locals() else None,
+            "message": "Resume roast has been queued and is now pending (downstream service error logged).",
+            "downstream_status": http_err.response.status_code,
+            "downstream_details": error_detail
+        }), 202
     except requests.exceptions.RequestException as req_err:
         logging.error(f"Request to n8n API failed: {str(req_err)}")
         return jsonify({"error": "Request to n8n API failed", "details": str(req_err)}), 500

@@ -209,6 +209,10 @@ def custom_access_token_hook():
         
         if not hmac.compare_digest(expected_signature, received_signature):
             current_app.logger.warning(f"Signature verification failed for webhook {webhook_id}")
+            current_app.logger.debug(f"Expected signature: {expected_signature[:20]}...")
+            current_app.logger.debug(f"Received signature: {received_signature[:20]}...")
+            current_app.logger.debug(f"Signed payload length: {len(signed_payload)}")
+            current_app.logger.debug(f"Secret bytes length: {len(secret_bytes)}")
             return jsonify({"error": "Signature verification failed"}), 401
         
         # Parse the event with size limits
