@@ -1,6 +1,6 @@
 from flask import request, jsonify, current_app, g
 import requests 
-from app.extensions import get_user_client, get_admin_client
+from app import extensions 
 import json
 import logging
 from threading import Thread
@@ -36,14 +36,14 @@ def get_request_data():
 @require_authentication
 @check_and_use_feature('cover_letter', auto_increment=False)
 def create_cover_letter():
-    current_user_id = str(g.user.id)
-    # Use admin client for INSERT operations (with explicit user filtering for security)
-    admin_supabase = get_admin_client()
-    # Use user client for SELECT operations (RLS enforced)
-    user_supabase = get_user_client()
+    """
+    Asynchronously triggers a long-running n8n workflow to generate a cover letter.
 
-    frontend_url = current_app.config.get("FRONTEND_ORIGIN", "http://localhost:3000")
-    xano_api_url_cover_letter = current_app.config.get("XANO_API_URL_COVER_LETTER")
+    This endpoint immediately returns a 202 Accepted response after triggering
+    the webhook. It does not wait for the workflow to complete. The client
+    is expected to poll the /get-cover-letters endpoint to retrieve the result.
+    """
+    n8n_api_url_cover_letter = "https://prepzo.app.n8n.cloud/webhook/cover-letter"
 
     try:
         data = request.get_json(silent=True) if request.is_json else request.form
@@ -85,21 +85,37 @@ def create_cover_letter():
 @require_authentication
 def get_cover_letters():
     current_user_id = str(g.user.id)
-    # Use admin client with explicit user filtering for consistent data access
-    admin_supabase = get_admin_client()
     try:
-        query_response = (
-            admin_supabase.table("cover_letter")
-            .select("*")  
-            .eq("uid", current_user_id)
-            .execute()
-        )
-        return jsonify(query_response.data or []), 200
+        job_id_param = request.args.get("job_id")
+
+        if job_id_param:
+            # Attempt to fetch the specific cover letter generated for this job_id
+            query_response = (
+                extensions.supabase.table("cover_letter")
+                .select("*")
+                .eq("job_id", job_id_param)
+                .eq("uid", current_user_id)
+                .execute()
+            )
+        else:
+            # Fallback: return the most-recent cover letter for the user
+            query_response = (
+                extensions.supabase.table("cover_letter")
+                .select("*")
+                .eq("uid", current_user_id)
+                .order("id", desc=True)
+                .execute()
+            )
+
+        # Supabase v2 may return dict/None instead of PostgrestResponse.
+        if query_response is None:
+            return jsonify(None), 200
+
+        result_data = getattr(query_response, "data", query_response)
+        return jsonify(result_data or None), 200
     except Exception as e:
         print(f"Error fetching from cover_letter table: {str(e)}")
         return jsonify({"error": f"Could not retrieve cover letters: {str(e)}"}), 500
-
-
 
 
 

@@ -5,6 +5,7 @@ import magic
 import json
 import logging
 import time
+import uuid
 from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import resume_analyze_event
@@ -19,43 +20,42 @@ def background_db_and_analytics(db_payload):
             logging.warning(f"Background Supabase insert failed or returned no data. Result: {result}")
     except Exception as e:
         logging.error(f"Background DB insert failed: {str(e)}")
+        
 @resume_analyze_bp.route("/analyze-resume", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature('resume', auto_increment=False)   # ← check only, no debit yet
+@check_and_use_feature('resume', auto_increment=False)
 def analyze_resume():
     current_user_id = str(g.user.id)
     user_name = g.user.user_metadata.get('name') or \
                 g.user.user_metadata.get('display_name') or \
                 g.user.email or current_user_id
-    # We no longer call n8n from here – we only create a pending job
-    
+
     try:
         data = request.get_json(silent=True) if request.is_json else request.form
         current_resume_url = data.get("current_resume") 
         job_description = data.get("job_description")
         company_website = data.get("company_website")
         additional_comment_text = data.get("additional_comments") 
+        job_id = str(uuid.uuid4())
 
         if not all([current_resume_url, job_description]):
             return jsonify({"error": "Missing required fields: current_resume (URL) and job_description"}), 400
 
-        import uuid
-        job_id = str(uuid.uuid4())  # correlation id for this analysis job
+        # Prepare payload for n8n webhook
+        n8n_payload = {
+            "current_resume": current_resume_url,
+            "job_description": job_description,
+            "company_website": company_website,
+            "additional_comments": additional_comment_text,
+            "user_id": current_user_id,
+            "user_name": user_name,
+            "job_id": job_id,
+        }
 
-        # Prepare background tasks but don't block on them
-        resume_id_from_db = None
-        try:
-            doc_query = extensions.supabase.table("user_documents") \
-                .select("id") \
-                .eq("document_url", current_resume_url) \
-                .eq("uid", current_user_id) \
-                .single() \
-                .execute()
-            if doc_query.data and doc_query.data.get("id"):
-                resume_id_from_db = doc_query.data.get("id")
-        except Exception as e:
-            logging.error(f"Error querying for resume_id (background will handle): {str(e)}")
-           
+        # Remove None values
+        n8n_payload = {k: v for k, v in n8n_payload.items() if v is not None}
+
+        # Insert a pending record into analyze_resume (non-blocking)
         db_payload = {
             "user_id": current_user_id,
             "user_name": user_name,
@@ -66,38 +66,30 @@ def analyze_resume():
             "additional_comment": additional_comment_text,
             "status": "PENDING",
             "feedback_analysis": None,
-            "resume_id": resume_id_from_db,
             "created_at": "now()",
         }
+        Thread(target=background_db_and_analytics, args=(db_payload,)).start()
 
+        # Call the n8n webhook
+        n8n_url = "https://prepzo.app.n8n.cloud/webhook/prod_resume_analyzer"
+        # n8n_response = requests.post(n8n_url, json=n8n_payload, timeout=30)
+
+        # if n8n_response.status_code != 200:
+        #     return jsonify({"error": "Resume analysis service failed", "details": n8n_response.text}), n8n_response.status_code
+
+        # Return the response from n8n (assumes JSON)
         try:
-            insert_response = extensions.supabase.table("analyze_resume").insert(db_payload).execute()
-            if not insert_response.data:
-                current_app.logger.warning(f"Warning: Supabase insert into analyze_resume may have failed or returned no data. Response: {insert_response}")
-        except Exception as e:
-            current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
-        
-        return (
-            jsonify(
-                {
-                    "job_id": job_id,
-                    "message": "Resume analysis has been queued and is now pending.",
-                }
-            ),
-            202,
-        )
+            # return jsonify(n8n_response.json()), 200
+            return jsonify({"message": "Resume analysis request accepted", "job_id": job_id}), 202
+        except ValueError:
+            # Fallback if response isn't JSON
+            return jsonify({"message": "Resume analysis request accepted", "job_id": job_id}), 202
 
     except requests.exceptions.Timeout:
         logging.error("Resume analysis request timed out")
         return jsonify({"error": "The resume analysis service is taking too long to respond. Please try again later."}), 504
-    except requests.exceptions.HTTPError as http_err:
-        try:
-            error_detail = http_err.response.json()
-        except ValueError:
-            error_detail = str(http_err)
-        return jsonify({"error": "n8n API request failed", "details": error_detail}), http_err.response.status_code
     except requests.exceptions.RequestException as req_err:
-        return jsonify({"error": "Request to n8n API failed", "details": str(req_err)}), 500
+        return jsonify({"error": "Request to resume analysis service failed", "details": str(req_err)}), 500
     except Exception as e:
         logging.error(f"A FATAL UNHANDLED EXCEPTION occurred in analyze_resume: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500
@@ -114,6 +106,7 @@ def get_analyze_resume():
                 extensions.supabase.table("analyze_resume")
                 .select("*")
                 .eq("user_id", current_user_id)
+                .eq("job_id", job_id_param)
                 .order("created_at", desc=True)
                 .execute()
             )
@@ -248,22 +241,7 @@ def roast_resume():
         except Exception as e:
             current_app.logger.error(f"Error inserting into analyze_resume table: {str(e)}")
 
-        # Trigger n8n workflow for resume roast (non-blocking)
-        webhook_url = "https://prepzo.app.n8n.cloud/webhook/prod_resume_roast"
-        try:
-            requests.post(
-                webhook_url,
-                json={
-                    "job_id": job_id,
-                    "resume_url": resume_url_for_xano,
-                    "user_id": current_user_id,
-                    "resume_id": resume_id_from_db
-                },
-                timeout=2
-            )
-        except requests.exceptions.RequestException as req_err:
-            current_app.logger.warning(f"n8n webhook call failed (non-blocking): {req_err}")
-
+        
         return (
             jsonify(
                 {
@@ -305,22 +283,22 @@ def roast_resume():
 def get_roast_resume():
     """
     Retrieve resume roast feedback for the authenticated user.
-    Optionally accepts an `id` query param to fetch a specific record.
+    Optionally accepts a `job_id` query param to fetch a specific record.
     """
     current_user_id = str(g.user.id)
     try:
-        record_id_param = request.args.get("id")
+        job_id_param = request.args.get("job_id")
 
         query = (
             extensions.supabase.table("analyze_resume")
             .select("*")
             .eq("user_id", current_user_id)
-            .eq("additional_comment", "Resume Roast Feedback")
+            .eq("additional_comment", "Resume Roast")
             .order("created_at", desc=True)
         )
 
-        if record_id_param:
-            query = query.eq("id", record_id_param)
+        if job_id_param:
+            query = query.eq("job_id", job_id_param)
 
         query_response = query.execute()
 
