@@ -1,0 +1,245 @@
+%-------------------------
+% Resume in Latex
+% Author : Jake Gutierrez
+% Based off of: https://github.com/sb2nov/resume
+% License : MIT
+%------------------------
+
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\input{glyphtounicode}
+
+
+%----------FONT OPTIONS----------
+% sans-serif
+% \usepackage[sfdefault]{FiraSans}
+% \usepackage[sfdefault]{roboto}
+% \usepackage[sfdefault]{noto-sans}
+% \usepackage[default]{sourcesanspro}
+
+% serif
+% \usepackage{CormorantGaramond}
+% \usepackage{charter}
+
+
+\pagestyle{fancy}
+\fancyhf{} % clear all header and footer fields
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Adjust margins
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Sections formatting
+\titleformat{\section}{
+  \vspace{-4pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+% Ensure that generate pdf is machine readable/ATS parsable
+\pdfgentounicode=1
+
+%-------------------------
+% Custom commands
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubSubheading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \textit{\small#1} & \textit{\small #2} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeSubItem}[1]{\resumeItem{#1}\vspace{-4pt}}
+
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+%%%%%%  RESUME STARTS HERE  %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\begin{document}
+
+%----------HEADING----------
+% \begin{tabular*}{\textwidth}{l@{\extracolsep{\fill}}r}
+%   \textbf{\href{http://sourabhbajaj.com/}{\Large Sourabh Bajaj}} & Email : \href{mailto:sourabh@sourabhbajaj.com}{sourabh@sourabhbajaj.com}\\
+%   \href{http://sourabhbajaj.com/}{http://www.sourabhbajaj.com} & Mobile : +1-123-456-7890 \\
+% \end{tabular*}
+
+\begin{center}
+    \textbf{\Huge \scshape Kushagra Gangwar} \\ \vspace{1pt}
+    \small  \href{mailto:kushagra6434@gmail.com}{\underline{kushagra6434@gmail.com}} $|$ 
+    \href{https://www.linkedin.com/in/kushagra6434/}{\underline{linkedin/kushagra6434}} $|$
+    \href{https://www.kushagragangwar.tech/}{\underline{kushagragangwar.tech/}}
+\end{center}
+
+
+%-----------EXPERIENCE-----------
+\section{Experience}
+  \resumeSubHeadingListStart
+
+    \resumeSubheading
+      {Software Engineer }{Mar 2025 -- Present}
+      {Prepzo}{Berlin, GER}
+      \resumeItemListStart
+        \resumeItem{Built with Next.js, Flask/Python, Pinecone, and Livekit to deliver personalized career guidance and resume analysis, driving a \textbf{25\%} lift in overall platform usage .}
+        \resumeItem{Architected and launched LLM-based conversational flows within the AI Career Coach, achieving a \textbf{40\%} reduction in user query resolution time and improving user satisfaction. }
+        \resumeItem{Added a real-time feedback loop for response ratings, which helped reduce negative feedback by \textbf{10\%} and powered continuous model improvements. }
+      \resumeItemListEnd
+      
+% -----------Multiple Positions Heading-----------
+%    \resumeSubSubheading
+%     {Software Engineer I}{Oct 2014 - Sep 2016}
+%     \resumeItemListStart
+%        \resumeItem{Apache Beam}
+%          {Apache Beam is a unified model for defining both batch and streaming data-parallel processing pipelines}
+%     \resumeItemListEnd
+%    \resumeSubHeadingListEnd
+%-------------------------------------------
+
+    \resumeSubheading
+      {Software Engineer }{Jul 2024 -- Feb 2025}
+      {SYMB Technologies}{Noida, UP}
+      \resumeItemListStart
+        \resumeItem{Developed and deployed core REST APIs using Node.js, integrating with PostgreSQL, enabling seamless management of user profiles and policy details, reducing average content load times by \textbf{1.5 seconds}.
+}
+        \resumeItem{Engineered backend workflows for ABM Technologies utilizing Flask and PostgreSQL, automating form submissions and content delivery, and cutting down content creation cycle times by \textbf{30\%} within the first quarter.
+}
+  
+    \resumeItemListEnd
+
+    \resumeSubheading
+      {Full Stack Developer }{Jan 2024 -- Jun 2024}
+      {DevopSpatial}{Bengaluru , KA}
+      \resumeItemListStart
+        \resumeItem{Automated the creation of a cloud-agnostic architecture that clients could use on the go.
+}
+        
+        \resumeItem{Devised and executed user registration and authentication frameworks using FusionAuth, which enabled secure access for  multiple users. The system now supports real-time analytics on user engagement and access patterns.
+  }
+%         \resumeItem{Seamlessly integrated critical tools, including GoCD, Nexus, and EKS, and assigned SuperAdmin roles to ensure comprehensive access and control. 
+% }
+        \resumeItem{Developed a secure user management framework incorporating HTML, CSS, and Node.js, now adopted by \textbf{15} team members.
+}
+       
+      \resumeItemListEnd
+
+  \resumeSubHeadingListEnd
+
+
+%-----------PROJECTS-----------
+\section{Projects}
+    \resumeSubHeadingListStart
+    \resumeProjectHeading
+          {\textbf{Prepzo.ai} \href{https://www.prepzo.ai/}{\textcolor{blue}{\underline{link}}} $|$ \emph{\textit{Flask, Docker, Postgres, Pinecone, AWS EC2 \& AWS EKS}}}{}
+
+          \resumeItemListStart
+            \resumeItem{Led the end-to-end engineering of an AI Career Coach platform offering personalized resume reviews, mock interviews, and career navigation tools, serving over \textbf{900+} users since launch.
+ 
+}
+            \resumeItem{Deployed and maintained a scalable production environment on AWS EC2 and S3 with CI/CD pipelines,  reducing manual release overhead by \textbf{80\%}.
+
+}           
+             \resumeItem{Optimized backend APIs (Flask + PostgreSQL) and frontend (Next.js) performance, cutting initial page load time by \textbf{25\%} using SSR, caching, and asset minimization.
+
+}
+\resumeItem{Integrated Pinecone for vector-based semantic search and Livekit for real-time video interview simulations, improving engagement with interactive features.}
+          \resumeItemListEnd
+      
+    \resumeProjectHeading
+          {\textbf{ABM Technologies} \href{https://www.abmtechnologies.us/}{\textcolor{blue}{\underline{link}}} $|$ \emph{\textit{Next.js, Typescript \& Google App Script}}}{}
+          \resumeItemListStart
+            \resumeItem{Engineered ABM’s website with Next.js and TypeScript, enhancing user experience and performance. 
+}
+            \resumeItem{Achieved a\textbf{ 30\% }reduction in page load time by optimizing assets and implementing Static Site Generation (SSG).
+}
+            \resumeItem{Enhanced\textbf{ }SEO performance, resulting in a \textbf{25\%} increase in organic search traffic.
+}
+          \resumeItemListEnd
+      
+      \resumeProjectHeading
+          {\textbf{Ombrellainsure} \href{https://www.ombrellainsure.com/}{\textcolor{blue}{\underline{link}}} $|$ \emph{\textit{ Nodejs, React.js, AWS \& Postgres}}}{}
+          \resumeItemListStart
+            \resumeItem{
+Built a scalable backend using Node, enabling robust API integration between the React frontend and Postgres database, resulting in a \textbf{30\%} boost in response time and concurrency handling.
+ 
+}
+            \resumeItem{
+Enabled seamless services and content management for a European InsurTech startup, improving site reliability and showcasing innovative product features.
+ 
+}
+          
+          
+          \resumeItemListEnd
+    \resumeSubHeadingListEnd
+
+
+
+%
+%-----------PROGRAMMING SKILLS-----------
+\section{Technical Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+     \textbf{Languages}{: C/C++, Python, SQL (Postgres), JavaScript, Typescript, HTML/CSS} \\
+     \textbf{Frameworks}{: React, Next.js, Node.js, Flask} \\
+     \textbf{Developer Tools}{: Git, Docker, GoCD, MongoDB, AWS EC2, AWS Code Build, AWS EKS, Supabase, Pinecone} \\
+     \textbf{Libraries}{: Redux toolkit, Axios, Tailwindcss, ShadCN-UI, Bootstrap}
+    }}
+ \end{itemize}
+
+
+%-------------------------------------------
+%-----------EDUCATION-----------
+\section{Education}
+  \resumeSubHeadingListStart
+    \resumeSubheading
+      {Ajay Kumar Garg Engineering College  }{Ghaziabad, IN}
+      {Bachelor of Technology in Computer Science and Engineering}{}
+  \resumeSubHeadingListEnd
+
+\end{document}

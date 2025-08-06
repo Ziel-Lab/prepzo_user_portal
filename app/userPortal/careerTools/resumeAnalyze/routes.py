@@ -10,6 +10,10 @@ from threading import Thread
 from app.userPortal.subscription.helpers import require_authentication, check_and_use_feature
 from app.utils.amplitude import resume_analyze_event
 from . import resume_analyze_bp 
+import tempfile
+import os
+import subprocess
+from flask import send_file
 
 
 def background_db_and_analytics(db_payload):
@@ -302,3 +306,72 @@ def get_roast_resume():
     except Exception as e:
         logging.error(f"Error fetching resume roast data: {str(e)}")
         return jsonify({"error": f"Could not retrieve resume roast data: {str(e)}"}), 500
+
+
+def markdown_to_pdf(markdown_content, template_path):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        md_path = os.path.join(tmpdir, "resume.md")
+        pdf_path = os.path.join(tmpdir, "resume.pdf")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+        try:
+            subprocess.run([
+                "pandoc", md_path,
+                "--from", "markdown",
+                "--template", template_path,
+                "--pdf-engine", "pdflatex",
+                "-o", pdf_path
+            ], check=True)
+        except Exception as e:
+            raise RuntimeError(f"Pandoc PDF generation failed: {e}")
+        return pdf_path
+
+@resume_analyze_bp.route("/download-resume-pdf", methods=["GET"])
+@require_authentication
+def download_resume_pdf():
+    current_user_id = str(g.user.id)
+    try:
+        # Fetch the latest analyze_resume record for this user
+        query_response = (
+            extensions.supabase.table("analyze_resume")
+            .select("*")
+            .eq("user_id", current_user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        result_data = getattr(query_response, "data", query_response)
+        if not result_data or not isinstance(result_data, list) or not result_data[0].get("feedback_analysis"):
+            return jsonify({"error": "No resume markdown found for this user."}), 404
+        feedback_analysis = result_data[0]["feedback_analysis"]
+        job_id = result_data[0].get("job_id", "latest")
+        if isinstance(feedback_analysis, str):
+            import json as _json
+            feedback_analysis = _json.loads(feedback_analysis)
+        markdown_content = feedback_analysis.get("new_resume", {}).get("new_resume")
+        if not markdown_content:
+            return jsonify({"error": "No markdown resume found in feedback_analysis."}), 404
+        # Use the provided LaTeX template
+        template_path = os.path.join(os.path.dirname(__file__), "templates", "resume.tex")
+        if not os.path.exists(template_path):
+            return jsonify({"error": "LaTeX template not found."}), 500
+        # Define unique file path in bucket
+        bucket_name = "user-documents"
+        pdf_filename = f"{current_user_id}/{job_id}_resume.pdf"
+        # Check if file already exists in Supabase bucket
+        storage = extensions.supabase.storage.from_(bucket_name)
+        public_url = storage.get_public_url(pdf_filename)
+        # Try to fetch the file to see if it exists (Supabase returns a URL even if file doesn't exist, so we check with a HEAD request)
+        import requests
+        head_resp = requests.head(public_url)
+        if head_resp.status_code == 200:
+            return jsonify({"pdf_url": public_url}), 200
+        # If not, generate and upload
+        pdf_path = markdown_to_pdf(markdown_content, template_path)
+        with open(pdf_path, "rb") as f:
+            storage.upload(pdf_filename, f.read(), file_options={"content-type": "application/pdf"})
+        public_url = storage.get_public_url(pdf_filename)
+        return jsonify({"pdf_url": public_url}), 200
+    except Exception as e:
+        logging.error(f"Error generating/uploading PDF: {e}")
+        return jsonify({"error": f"Failed to generate/upload PDF: {str(e)}"}), 500
