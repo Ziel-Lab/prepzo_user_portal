@@ -1,63 +1,132 @@
-\documentclass[letterpaper,11pt]{article}
-\usepackage[margin=1in]{geometry}
-\usepackage{hyperref}
-\usepackage{fancyhdr}
+%-------------------------
+% Dynamic Resume in LaTeX (Jinja2 template)
+% Based on Jake Gutierrez resume style
+%-------------------------
 
+\documentclass[letterpaper,11pt]{article}
+
+% ---------- packages ----------
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\input{glyphtounicode}
+
+% ---------- page style ----------
 \pagestyle{fancy}
-\fancyhf{} % clear all header and footer fields
+\fancyhf{}
+\fancyfoot{}
 \renewcommand{\headrulewidth}{0pt}
 \renewcommand{\footrulewidth}{0pt}
 
-% Define dynamic variables
-\newcommand{\name}{ {{ full_name }} }
-\newcommand{\email}{ {{ email }} }
-\newcommand{\linkedin}{ {{ linkedin_url }} }
-\newcommand{\website}{ {{ website_url }} }
+%% Margins
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+%% Section formatting
+\titleformat{\section}{\vspace{-4pt}\scshape\raggedright\large}{}{0em}{}[\color{black}\titlerule \vspace{-5pt}]
+
+%% Ensure machine-readable pdf
+\pdfgentounicode=1
+
+% ---------- custom commands ----------
+\newcommand{\resumeItem}[1]{\item\small{#1 \vspace{-2pt}}}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]} 
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+
+%-------------------------------------------
+%%%%%%  RESUME STARTS HERE  %%%%%%%%%%%%%%%%%
+%-------------------------------------------
 
 \begin{document}
 
-% Header
+%% -------- Header --------
 \begin{center}
-    {\Huge \bfseries \name} \\ \vspace{2pt}
-    \href{mailto:\email}{\email} $|$
-    \href{\linkedin}{linkedin/\name} $|$
-    \href{\website}{\website}
+    \textbf{\Huge \scshape {{ full_name }} }\\[1pt]
+    \small \href{mailto:{{ email }}}{\underline{{ email }}} $|$ 
+    \href{ {{ linkedin_url }} }{\underline{linkedin/{{ linkedin_handle|default(full_name|lower|replace(' ','')) }}}} $|$ 
+    \href{ {{ website_url }} }{\underline{ {{ website_url }} }}
 \end{center}
 
-% Experience Section
-\section*{Experience}
+% -------- Experience --------
+\section{Experience}
+\resumeSubHeadingListStart
 {% for job in experience %}
-\textbf{ {{ job.title }} } \hfill \textit{ {{ job.duration }} }\\
-{{ job.company }} -- {{ job.location }} \\
-\begin{itemize}
-    {% for point in job.responsibilities %}
-    \item {{ point }}
-    {% endfor %}
-\end{itemize}
+  \resumeSubheading{ {{ job.title }} }{ {{ job.duration }} }{ {{ job.company }} }{ {{ job.location }} }
+  \resumeItemListStart
+  {% for pt in job.responsibilities %}
+    \resumeItem{ {{ pt }} }
+  {% endfor %}
+  \resumeItemListEnd
 {% endfor %}
+\resumeSubHeadingListEnd
 
-% Projects Section
-\section*{Projects}
+% -------- Projects --------
+\section{Projects}
+\resumeSubHeadingListStart
 {% for project in projects %}
-\textbf{ {{ project.title }} } \hfill \textit{ {{ project.stack }} } \\
-{% if project.link %}\href{ {{ project.link }} }{link} \\{% endif %}
-\begin{itemize}
-    {% for point in project.details %}
-    \item {{ point }}
+    \resumeProjectHeading{\textbf{ {{ project.title }} }{% if project.link %} \href{ {{ project.link }} }{\textcolor{blue}{\underline{link}}}{% endif %} $|$ \emph{\textit{ {{ project.stack }} }}}{}
+    \resumeItemListStart
+    {% for pt in project.details %}
+        \resumeItem{ {{ pt }} }
     {% endfor %}
-\end{itemize}
+    \resumeItemListEnd
 {% endfor %}
+\resumeSubHeadingListEnd
 
-% Skills
-\section*{Technical Skills}
-\textbf{Languages:} {{ skills.languages }} \\
-\textbf{Frameworks:} {{ skills.frameworks }} \\
-\textbf{Developer Tools:} {{ skills.tools }} \\
-\textbf{Libraries:} {{ skills.libraries }} \\
+% -------- Skills --------
+\section{Technical Skills}
+\begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+        \textbf{Languages}{: {{ skills.languages }} } \\
+        \textbf{Frameworks}{: {{ skills.frameworks }} } \\
+        \textbf{Developer Tools}{: {{ skills.tools }} } \\
+        \textbf{Libraries}{: {{ skills.libraries }} }
+    }}
+\end{itemize}
 
-% Education
-\section*{Education}
-\textbf{ {{ education.institute }} } -- {{ education.location }} \\
-{{ education.degree }}
+% -------- Education --------
+\section{Education}
+\resumeSubHeadingListStart
+  \resumeSubheading{ {{ education.institute }} }{}{ {{ education.location }} }{}
+  \resumeItemListStart
+    \resumeItem{ {{ education.degree }} }
+  \resumeItemListEnd
+\resumeSubHeadingListEnd
 
 \end{document}
