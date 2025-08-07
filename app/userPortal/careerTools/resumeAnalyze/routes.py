@@ -440,7 +440,8 @@ def download_resume_pdf():
 
         # Upload to Supabase
         bucket_name = "user-documents"
-        pdf_filename = f"{current_user_id}/{job_id}_resume.pdf"
+        timestamp = int(time.time())
+        pdf_filename = f"{current_user_id}/{job_id}_{timestamp}_resume.pdf"
         storage = extensions.supabase.storage.from_(bucket_name)
         storage.upload(pdf_filename, pdf_bytes, file_options={"content-type": "application/pdf"})
         public_url = storage.get_public_url(pdf_filename)
