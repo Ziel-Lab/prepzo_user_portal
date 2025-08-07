@@ -318,23 +318,6 @@ def get_roast_resume():
         return jsonify({"error": f"Could not retrieve resume roast data: {str(e)}"}), 500
 
 
-def markdown_to_pdf(markdown_content, template_path):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        md_path = os.path.join(tmpdir, "resume.md")
-        pdf_path = os.path.join(tmpdir, "resume.pdf")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(markdown_content)
-        try:
-            subprocess.run([
-                "pandoc", md_path,
-                "--from", "markdown",
-                "--template", template_path,
-                "--pdf-engine", "pdflatex",
-                "-o", pdf_path
-            ], check=True)
-        except Exception as e:
-            raise RuntimeError(f"Pandoc PDF generation failed: {e}")
-        return pdf_path
 
 def render_resume_latex(data, template_path):
     with open(template_path, "r", encoding="utf-8") as f:
@@ -378,7 +361,7 @@ def download_resume_pdf():
         if isinstance(feedback_analysis, str):
             import json as _json
             feedback_analysis = _json.loads(feedback_analysis)
-        resume_data = feedback_analysis.get("new_resume", {})  # or adjust as per your JSON structure
+        resume_data = feedback_analysis.get("new_resume", {}).get("new_resume", {})  # or adjust as per your JSON structure
 
         # Prepare skills as comma-separated strings if needed
         skills = resume_data.get("skills", {})
