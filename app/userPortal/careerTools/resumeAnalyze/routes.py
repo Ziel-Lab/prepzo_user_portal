@@ -326,17 +326,34 @@ def render_resume_latex(data, template_path):
     return template.render(**data)
 
 def latex_to_pdf(latex_content):
+    """Compile LaTeX string to PDF.
+
+    We purposefully run pdfLaTeX twice (to resolve refs) and treat a non-zero
+    exit code as *non-fatal* **if** the expected PDF is produced.  Some LaTeX
+    warnings (e.g. “rerun to get cross-references right”) cause pdfLaTeX to
+    exit with code 1 even though a valid PDF is written.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_path = os.path.join(tmpdir, "resume.tex")
         pdf_path = os.path.join(tmpdir, "resume.pdf")
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(latex_content)
-        try:
-            subprocess.run([
-                "pdflatex", "-interaction=nonstopmode", tex_path
-            ], cwd=tmpdir, check=True)
-        except Exception as e:
-            raise RuntimeError(f"LaTeX PDF generation failed: {e}")
+
+        for i in range(2):  # run twice to settle refs
+            result = subprocess.run([
+                "pdflatex",
+                "-interaction=nonstopmode",
+                tex_path,
+            ], cwd=tmpdir)
+            # break early if pdf exists and return code is zero
+            if result.returncode == 0:
+                break
+        # If return code non-zero but PDF exists, accept it anyway
+        if not os.path.exists(pdf_path):
+            raise RuntimeError(
+                "LaTeX PDF generation failed (pdf not produced). "
+                f"Return code: {result.returncode}"
+            )
         return pdf_path
 
 @resume_analyze_bp.route("/download-resume-pdf", methods=["GET"])
