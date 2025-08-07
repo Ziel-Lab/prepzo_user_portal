@@ -358,10 +358,54 @@ def download_resume_pdf():
             return jsonify({"error": "No resume data found for this user."}), 404
         feedback_analysis = result_data[0]["feedback_analysis"]
         job_id = result_data[0].get("job_id", "latest")
+
+        # ------------------------------------------------------------------
+        # Robust parsing: handle cases where Supabase returns JSON as a string
+        # that might be double-encoded or use single quotes (Python repr).
+        # ------------------------------------------------------------------
+        import json as _json
+        import ast
         if isinstance(feedback_analysis, str):
-            import json as _json
-            feedback_analysis = _json.loads(feedback_analysis)
-        resume_data = feedback_analysis.get("new_resume", {}).get("new_resume", {})  # or adjust as per your JSON structure
+            try:
+                feedback_analysis = _json.loads(feedback_analysis)
+            except _json.JSONDecodeError as e:
+                logging.warning(
+                    "Strict JSON parsing failed for feedback_analysis: %s. Attempting ast.literal_eval fallback.",
+                    e,
+                )
+                try:
+                    # ast.literal_eval can safely evaluate Python literals (dict/str/list)
+                    feedback_analysis = ast.literal_eval(feedback_analysis)
+                except Exception as e2:
+                    logging.error(
+                        "Both JSON and literal_eval parsing failed for feedback_analysis: %s | Data snippet: %s",
+                        e2,
+                        str(feedback_analysis)[:300],
+                    )
+                    return jsonify({"error": "Stored resume data is invalid JSON"}), 500
+
+        # Dig one level deeper – actual resume sits inside new_resume.new_resume
+        new_resume_container = feedback_analysis.get("new_resume", {})
+        if isinstance(new_resume_container, str):
+            try:
+                new_resume_container = _json.loads(new_resume_container)
+            except _json.JSONDecodeError:
+                try:
+                    new_resume_container = ast.literal_eval(new_resume_container)
+                except Exception:
+                    logging.error("Unable to parse inner new_resume JSON")
+                    return jsonify({"error": "Invalid nested resume data"}), 500
+
+        resume_data = new_resume_container.get("new_resume", {})
+        if isinstance(resume_data, str):
+            try:
+                resume_data = _json.loads(resume_data)
+            except _json.JSONDecodeError:
+                try:
+                    resume_data = ast.literal_eval(resume_data)
+                except Exception:
+                    logging.error("Unable to parse deepest resume_data JSON")
+                    return jsonify({"error": "Invalid resume data payload"}), 500
 
         # Prepare skills as comma-separated strings if needed
         skills = resume_data.get("skills", {})
