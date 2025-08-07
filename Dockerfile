@@ -5,10 +5,13 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# Install minimal LaTeX for PDF generation
-RUN apt-get update && apt-get install -y \
+# Install more complete LaTeX stack (larger, but feature-rich)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     texlive-latex-base \
+    texlive-latex-recommended \
     texlive-fonts-recommended \
+    texlive-latex-extra \
+    texlive-fonts-extra \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir -r requirements.txt
