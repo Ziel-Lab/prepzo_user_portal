@@ -1,17 +1,8 @@
 \documentclass[letterpaper,11pt]{article}
-\usepackage{latexsym}
 \usepackage[margin=1in]{geometry}
-\usepackage{titlesec}
-\usepackage{marvosym}
-\usepackage[usenames,dvipsnames]{color}
 \usepackage{hyperref}
 \usepackage{enumitem}
 \usepackage{fancyhdr}
-\usepackage{multicol}
-\usepackage{graphicx}
-\usepackage{tabularx}
-\usepackage{fontawesome}
-\usepackage[T1]{fontenc}
 
 \pagestyle{fancy}
 \fancyhf{} % clear all header and footer fields
@@ -39,7 +30,7 @@
 {% for job in experience %}
 \textbf{ {{ job.title }} } \hfill \textit{ {{ job.duration }} }\\
 {{ job.company }} -- {{ job.location }} \\
-\begin{itemize}[leftmargin=*]
+\begin{itemize}
     {% for point in job.responsibilities %}
     \item {{ point }}
     {% endfor %}
@@ -50,8 +41,8 @@
 \section*{Projects}
 {% for project in projects %}
 \textbf{ {{ project.title }} } \hfill \textit{ {{ project.stack }} } \\
-\href{ {{ project.link }} }{link} \\
-\begin{itemize}[leftmargin=*]
+{% if project.link %}\href{ {{ project.link }} }{link} \\{% endif %}
+\begin{itemize}
     {% for point in project.details %}
     \item {{ point }}
     {% endfor %}
