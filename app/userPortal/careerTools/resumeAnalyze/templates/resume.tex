@@ -20,9 +20,9 @@
 
 % Define dynamic variables
 \newcommand{\name}{ {{ full_name }} }
-\newcommand{\email}{{ { email } }}
-\newcommand{\linkedin}{{ { linkedin_url } }}
-\newcommand{\website}{{ { website_url } }}
+\newcommand{\email}{ {{ email }} }
+\newcommand{\linkedin}{ {{ linkedin_url }} }
+\newcommand{\website}{ {{ website_url }} }
 
 \begin{document}
 
@@ -37,7 +37,7 @@
 % Experience Section
 \section*{Experience}
 {% for job in experience %}
-\textbf{{ {{ job.title }} }} \hfill \textit{{ {{ job.duration }} }}\\
+\textbf{ {{ job.title }} } \hfill \textit{ {{ job.duration }} }\\
 {{ job.company }} -- {{ job.location }} \\
 \begin{itemize}[leftmargin=*]
     {% for point in job.responsibilities %}
@@ -49,8 +49,8 @@
 % Projects Section
 \section*{Projects}
 {% for project in projects %}
-\textbf{{ {{ project.title }} }} \hfill \textit{{ project.stack }} \\
-\href{{ {{ project.link }} }}{link} \\
+\textbf{ {{ project.title }} } \hfill \textit{ {{ project.stack }} } \\
+\href{ {{ project.link }} }{link} \\
 \begin{itemize}[leftmargin=*]
     {% for point in project.details %}
     \item {{ point }}
@@ -67,7 +67,7 @@
 
 % Education
 \section*{Education}
-\textbf{{ {{ education.institute }} }} -- {{ education.location }} \\
+\textbf{ {{ education.institute }} } -- {{ education.location }} \\
 {{ education.degree }}
 
 \end{document}
