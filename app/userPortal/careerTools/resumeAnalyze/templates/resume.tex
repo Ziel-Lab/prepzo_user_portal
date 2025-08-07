@@ -80,7 +80,7 @@
 %% -------- Header --------
 \begin{center}
     \textbf{\Huge \scshape {{ full_name }} }\\[1pt]
-    \small \href{mailto:{{ email }}}{\underline{{ email }}} $|$ 
+    \small \href{mailto:{{ email }}}{\underline{ {{ email }} }} $|$ 
     \href{ {{ linkedin_url }} }{\underline{linkedin/{{ linkedin_handle|default(full_name|lower|replace(' ','')) }}}} $|$ 
     \href{ {{ website_url }} }{\underline{ {{ website_url }} }}
 \end{center}
@@ -92,7 +92,7 @@
   \resumeSubheading{ {{ job.title }} }{ {{ job.duration }} }{ {{ job.company }} }{ {{ job.location }} }
   \resumeItemListStart
   {% for pt in job.responsibilities %}
-    \resumeItem{ {{ pt }} }
+    \resumeItem{ {{ pt|e }} }
   {% endfor %}
   \resumeItemListEnd
 {% endfor %}
@@ -105,7 +105,7 @@
     \resumeProjectHeading{\textbf{ {{ project.title }} }{% if project.link %} \href{ {{ project.link }} }{\textcolor{blue}{\underline{link}}}{% endif %} $|$ \emph{\textit{ {{ project.stack }} }}}{}
     \resumeItemListStart
     {% for pt in project.details %}
-        \resumeItem{ {{ pt }} }
+        \resumeItem{ {{ pt|e }} }
     {% endfor %}
     \resumeItemListEnd
 {% endfor %}
