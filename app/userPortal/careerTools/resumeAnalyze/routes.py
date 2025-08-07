@@ -326,12 +326,10 @@ def render_resume_latex(data, template_path):
     return template.render(**data)
 
 def latex_to_pdf(latex_content):
-    """Compile LaTeX string to PDF.
+    """Compile LaTeX string to PDF and return the *bytes* of the PDF.
 
-    We purposefully run pdfLaTeX twice (to resolve refs) and treat a non-zero
-    exit code as *non-fatal* **if** the expected PDF is produced.  Some LaTeX
-    warnings (e.g. “rerun to get cross-references right”) cause pdfLaTeX to
-    exit with code 1 even though a valid PDF is written.
+    We run `pdflatex` twice to resolve cross-references.  A non-zero exit code
+    is tolerated as long as the expected `resume.pdf` is produced.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_path = os.path.join(tmpdir, "resume.tex")
@@ -339,22 +337,22 @@ def latex_to_pdf(latex_content):
         with open(tex_path, "w", encoding="utf-8") as f:
             f.write(latex_content)
 
-        for i in range(2):  # run twice to settle refs
-            result = subprocess.run([
-                "pdflatex",
-                "-interaction=nonstopmode",
-                tex_path,
-            ], cwd=tmpdir)
-            # break early if pdf exists and return code is zero
-            if result.returncode == 0:
+        for _ in range(2):
+            result = subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", tex_path], cwd=tmpdir
+            )
+            # Stop early if success
+            if result.returncode == 0 and os.path.exists(pdf_path):
                 break
-        # If return code non-zero but PDF exists, accept it anyway
+
         if not os.path.exists(pdf_path):
             raise RuntimeError(
-                "LaTeX PDF generation failed (pdf not produced). "
+                "LaTeX PDF generation failed: pdf not produced. "
                 f"Return code: {result.returncode}"
             )
-        return pdf_path
+
+        with open(pdf_path, "rb") as f:
+            return f.read()
 
 @resume_analyze_bp.route("/download-resume-pdf", methods=["GET"])
 @require_authentication
@@ -437,15 +435,14 @@ def download_resume_pdf():
             return jsonify({"error": "LaTeX template not found."}), 500
         latex_content = render_resume_latex(resume_data, template_path)
 
-        # Compile to PDF
-        pdf_path = latex_to_pdf(latex_content)
+        # Compile to PDF bytes
+        pdf_bytes = latex_to_pdf(latex_content)
 
         # Upload to Supabase
         bucket_name = "user-documents"
         pdf_filename = f"{current_user_id}/{job_id}_resume.pdf"
         storage = extensions.supabase.storage.from_(bucket_name)
-        with open(pdf_path, "rb") as f:
-            storage.upload(pdf_filename, f.read(), file_options={"content-type": "application/pdf"})
+        storage.upload(pdf_filename, pdf_bytes, file_options={"content-type": "application/pdf"})
         public_url = storage.get_public_url(pdf_filename)
         return jsonify({"pdf_url": public_url}), 200
     except Exception as e:
