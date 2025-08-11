@@ -424,9 +424,9 @@ def download_resume_pdf():
 
         # Prepare skills as comma-separated strings if needed
         skills = resume_data.get("skills", {})
-        for key in ["tools", "libraries"]:
-            if isinstance(skills.get(key), list):
-                skills[key] = ", ".join(skills[key])
+        # for key in ["tools", "libraries"]:
+        #     if isinstance(skills.get(key), list):
+        #         skills[key] = ", ".join(skills[key])
         resume_data["skills"] = skills
 
         # Render LaTeX
