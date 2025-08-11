@@ -117,7 +117,7 @@
 \section{Technical Skills}
 {% if skills.languages %}\textbf{Languages:} {{ latex_escape(skills.languages | join(', ')) }} \\{% endif %}
 {% if skills.frameworks %}\textbf{Frameworks:} {{ latex_escape(skills.frameworks | join(', ')) }} \\{% endif %}
-{% if skills.tools %}\textbf{Developer Tools:} {{ latex_escape(skills.tools | join(', ')) }} \\{% endif %}
+{% if skills.tools %}\textbf{Developer Tools:} {{ skills.tools | join(', ') }} \\{% endif %}
 {% if skills.libraries %}\textbf{Libraries:} {{ latex_escape(skills.libraries | join(', ')) }} \\{% endif %}
 
 % ---------- EXPERIENCE ----------
