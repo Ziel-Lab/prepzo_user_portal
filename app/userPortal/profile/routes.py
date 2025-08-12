@@ -404,13 +404,18 @@ def get_user_interview_summary():
 
         # Fetch attempts joined with parent mock_interview to get interview_type
         attempts_result = supabase.table('mock_interview_attempts')\
-            .select('actual_duration_minutes, feedback, mock_interview!inner(id, user_id, interview_type)')\
+            .select('id, mock_interview_id, status, completed_at, actual_duration_minutes, feedback, mock_interview!inner(id, user_id, interview_type)')\
             .execute()
 
         attempts_data = attempts_result.data if attempts_result and attempts_result.data else []
 
         user_attempts = []
         scores = []
+
+        # Aggregations for UI
+        sessions_completed = 0
+        total_minutes = 0
+        category_totals = {}  # interview_type -> {sum: int, count: int}
 
         for attempt in attempts_data:
             parent = attempt.get('mock_interview', {}) or {}
@@ -420,26 +425,73 @@ def get_user_interview_summary():
                 continue
 
             interview_type = parent.get('interview_type')
-            duration_minutes = attempt.get('actual_duration_minutes')
+            duration_minutes = attempt.get('actual_duration_minutes') or 0
+            status = (attempt.get('status') or '').upper()
+            completed_at = attempt.get('completed_at')
 
-            # Use evaluation_score column first; fallback to parsing feedback JSON
+            # Score strictly from feedback
             score = extract_score_from_feedback(attempt.get('feedback'))
 
+            # Track completed sessions (based on status or completed_at)
+            if completed_at or status in ['COMPLETED', 'PROCESSED']:
+                sessions_completed += 1
+                total_minutes += int(duration_minutes)
+
+            # Collect attempt details (for recent/graph)
             user_attempts.append({
+                'attempt_id': attempt.get('id'),
+                'mock_interview_id': attempt.get('mock_interview_id'),
                 'interview_type': interview_type,
-                'actual_duration_minutes': duration_minutes,
-                'score': score
+                'actual_duration_minutes': int(duration_minutes),
+                'score': score,
+                'status': status,
+                'completed_at': completed_at
             })
 
+            # Category performance (only when we have a score)
             if score is not None:
-                scores.append(score)
+                scores.append(int(score))
+                bucket = category_totals.setdefault(interview_type or 'unknown', {'sum': 0, 'count': 0})
+                bucket['sum'] += int(score)
+                bucket['count'] += 1
 
-        average_score = round(sum(scores) / len(scores), 2) if scores else None
+        # Build category performance list
+        category_performance = []
+        for cat, agg in category_totals.items():
+            avg = round(agg['sum'] / agg['count'], 2) if agg['count'] else None
+            category_performance.append({
+                'interview_type': cat,
+                'average_score': avg,
+                'attempts': agg['count']
+            })
+
+        # Sort categories by attempts desc
+        category_performance.sort(key=lambda x: x['attempts'], reverse=True)
+
+        # Recent attempts: most recent by completed_at (fallback to list order)
+        recent_attempts = sorted(
+            user_attempts,
+            key=lambda a: a.get('completed_at') or '',
+            reverse=True
+        )[:5]
+
+        # Overall average score and percent (assuming score scale 0-10)
+        overall_average_score = round(sum(scores) / len(scores), 2) if scores else None
+        overall_score_percent = round(overall_average_score * 10, 2) if overall_average_score is not None else None
+
+        total_hours = round(total_minutes / 60.0, 2)
 
         return jsonify({
-            'attempts': user_attempts,
-            'average_score': average_score,
-            'total_scored_attempts': len(scores)
+            'metrics': {
+                'sessions_completed': sessions_completed,
+                'total_practice_minutes': total_minutes,
+                'total_practice_hours': total_hours,
+                'overall_average_score': overall_average_score,  # out of 10
+                'overall_score_percent': overall_score_percent
+            },
+            'category_performance': category_performance,
+            'recent_attempts': recent_attempts,
+            'attempts': user_attempts
         }), 200
 
     except Exception as e:
