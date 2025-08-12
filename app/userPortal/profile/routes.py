@@ -4,6 +4,7 @@ from app.userPortal.subscription.helpers import require_authentication
 from app import extensions
 import requests
 import uuid
+import json  # added for score parsing
 
 # Supabase storage bucket used for user-uploaded resumes
 SUPABASE_BUCKET = "user-documents"
@@ -13,6 +14,44 @@ MAX_AVATAR_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB limit for avatar files
 
 def allowed_image_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_IMAGE_EXTENSIONS
+
+def extract_score_from_feedback(feedback_json):
+    """Return an int score extracted from the feedback JSON structure.
+
+    The feedback can be either a dict or a JSON string. The function looks for a
+    "Score" field which may contain a number (e.g. "7") or a fraction
+    (e.g. "7/10"). If found, it returns the integer part; otherwise `None`.
+    """
+    try:
+        if not feedback_json:
+            return None
+        # Convert to dict if incoming as string
+        if isinstance(feedback_json, str):
+            feedback_data = json.loads(feedback_json)
+        else:
+            feedback_data = feedback_json
+
+        score_raw = feedback_data.get('Score')
+        if score_raw is None:  # Key missing
+            return None
+
+        # Handle string formats like "7" or "7/10"
+        if isinstance(score_raw, str):
+            parts = score_raw.split('/')
+            numeric_part = parts[0].strip()
+            if numeric_part.isdigit():
+                return int(numeric_part)
+            # try float to int
+            try:
+                return int(float(numeric_part))
+            except ValueError:
+                return None
+        # Handle numeric types directly
+        if isinstance(score_raw, (int, float)):
+            return int(score_raw)
+    except Exception:
+        pass  # Silently ignore malformed feedback
+    return None
 
 @profile_bp.route('/upload-linkedin-pdf', methods=['POST', 'OPTIONS'])
 @require_authentication
@@ -337,3 +376,72 @@ def edit_public_slug():
     except Exception as e:
         current_app.logger.error(f'Failed to edit public slug: {e}', exc_info=True)
         return jsonify({'error': 'Failed to edit slug', 'details': str(e)}), 500
+
+# ---------------------------------------------------------------------------
+# GET /profile/interview-summary – aggregated interview performance for user
+# ---------------------------------------------------------------------------
+
+@profile_bp.route('/interview-summary', methods=['GET'])
+@require_authentication
+def get_user_interview_summary():
+    """Return per-attempt interview metrics and the average score for the
+    authenticated user.
+
+    Each attempt item contains:
+      • interview_type (from mock_interview table)
+      • actual_duration_minutes (from mock_interview_attempts table)
+      • score (parsed from evaluation_score column or Score field in feedback JSON)
+
+    The response also includes the overall average score calculated across all
+    attempts that have a valid numeric score.
+    """
+    try:
+        supabase = extensions.supabase
+        if supabase is None:
+            return jsonify({'error': 'Supabase client not initialized'}), 500
+
+        user_id = str(g.user.id)
+
+        # Fetch attempts joined with parent mock_interview to get interview_type
+        attempts_result = supabase.table('mock_interview_attempts')\
+            .select('actual_duration_minutes, feedback, mock_interview!inner(id, user_id, interview_type)')\
+            .execute()
+
+        attempts_data = attempts_result.data if attempts_result and attempts_result.data else []
+
+        user_attempts = []
+        scores = []
+
+        for attempt in attempts_data:
+            parent = attempt.get('mock_interview', {}) or {}
+
+            # Only include attempts that belong to the current user
+            if parent.get('user_id') != user_id:
+                continue
+
+            interview_type = parent.get('interview_type')
+            duration_minutes = attempt.get('actual_duration_minutes')
+
+            # Use evaluation_score column first; fallback to parsing feedback JSON
+            score = extract_score_from_feedback(attempt.get('feedback'))
+
+            user_attempts.append({
+                'interview_type': interview_type,
+                'actual_duration_minutes': duration_minutes,
+                'score': score
+            })
+
+            if score is not None:
+                scores.append(score)
+
+        average_score = round(sum(scores) / len(scores), 2) if scores else None
+
+        return jsonify({
+            'attempts': user_attempts,
+            'average_score': average_score,
+            'total_scored_attempts': len(scores)
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f'Failed to generate interview summary: {e}', exc_info=True)
+        return jsonify({'error': 'Failed to generate interview summary', 'details': str(e)}), 500
