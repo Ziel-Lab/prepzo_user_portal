@@ -417,12 +417,22 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
 
             # Only increment if we’re told to
             if auto_increment and 200 <= status_code < 300:
-                supabase.rpc('increment_feature_counters', {
-                    'p_user_id': uid,
-                    'p_period_start': usage_record['period_start'],
-                    'p_feature_base_name': feature_name,
-                    'p_increment_by': increment_by
-                }).execute()
+                # Use admin client for counter increment to avoid user JWT expiry issues
+                try:
+                    admin_supabase.rpc('increment_feature_counters', {
+                        'p_user_id': uid,
+                        'p_period_start': usage_record['period_start'],
+                        'p_feature_base_name': feature_name,
+                        'p_increment_by': increment_by
+                    }).execute()
+                except APIError as e:
+                    current_app.logger.warning(
+                        f"Feature counter increment skipped due to API error for user {uid[:8]}***: {type(e).__name__}: {str(e)}"
+                    )
+                except Exception as e:
+                    current_app.logger.warning(
+                        f"Feature counter increment skipped due to unexpected error for user {uid[:8]}***: {type(e).__name__}: {str(e)}"
+                    )
             return response, status_code
         
         return decorated_function

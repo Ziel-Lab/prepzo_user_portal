@@ -1,0 +1,139 @@
+{# Safe LaTeX escaping macro - use as {{ latex_escape(value) }} #}
+{% macro latex_escape(text) -%}
+{{ (text | default(''))
+    | replace('\\', '\\textbackslash{}')
+    | replace('#', '\\#')
+    | replace('%', '\\%')
+    | replace('$', '\\$')
+    | replace('&', '\\&')
+    | replace('_', '\\_')
+    | replace('{', '\\{')
+    | replace('}', '\\}')
+    | replace('~', '\\textasciitilde{}')
+    | replace('^', '\\textasciicircum{}')
+}}
+{%- endmacro %}
+
+% -------------- ASU Sparkysundevil style (Jinja-generated) --------------
+\documentclass{resume}
+
+\begin{document}
+
+% --------- Contact / Intro -----------
+\introduction[
+    fullname={{{ latex_escape(full_name | default('')) }}},
+    email={{{ latex_escape(email | default('')) }}},
+    phone={{{ latex_escape(phone | default('')) }}},
+    linkedin={{{ latex_escape(linkedin | default('')) }}},
+    github={{{ latex_escape(github | default('')) }}}
+]
+
+% --------- Summary -----------
+{% if summary %}
+\summary{ {{ latex_escape(summary) }} }
+{% endif %}
+
+% --------- Education ---------
+{% if education is iterable and education|length > 0 %}
+\begin{educationSection}{Education}
+  {% for edu in education %}
+    {# build coursework if present (join list or use string) #}
+    {% set coursework_val = '' %}
+    {% if edu.coursework is iterable %}
+      {% set coursework_val = edu.coursework | join(', ') %}
+    {% else %}
+      {% set coursework_val = edu.coursework | default('') %}
+    {% endif %}
+    \educationItem[
+        university={{{ latex_escape(edu.university | default(edu.institution | default('')) ) }}},
+        {% if edu.college %}college={{{ latex_escape(edu.college) }}},{% endif %}
+        {% if edu.graduation %}graduation={{{ latex_escape(edu.graduation) }}},{% endif %}
+        {% if edu.grade %}grade={{{ latex_escape(edu.grade) }}},{% endif %}
+        {% if edu.program %}program={{{ latex_escape(edu.program) }}},{% endif %}
+        {% if coursework_val %}coursework={{'{'}}{{ latex_escape(coursework_val) }}{{'}'}}, {% endif %}
+    ]
+  {% endfor %}
+\end{educationSection}
+{% endif %}
+
+% --------- Skills -----------
+{% if skills %}
+\begin{skillsSection}{Skills}
+    {% for cat, items in skills.items() %}
+        {# handle items as list or string #}
+        {% if items is iterable and not (items is string) %}
+            {% set items_str = items | join(', ') %}
+        {% else %}
+            {% set items_str = items | default('') %}
+        {% endif %}
+        \skillItem[
+            category={{{ latex_escape(cat | replace('_', ' ') | title) }}},
+            skills={{{ latex_escape(items_str) }}}
+        ] {% if not loop.last %}\\{% endif %}
+    {% endfor %}
+\end{skillsSection}
+{% endif %}
+
+% --------- Experience -----------
+{% if experience %}
+\begin{experienceSection}{ Experience}
+  {% for e in experience %}
+    \experienceItem[
+        company={{{ latex_escape(e.company | default('')) }}},
+        location={{{ latex_escape(e.location | default('')) }}},
+        position={{{ latex_escape(e.title | default(e.position | default(''))) }}},
+        duration={{{ latex_escape(e.duration | default(e.date | default(''))) }}}
+    ]
+    \begin{itemize}
+        \vspace{-0.2em}
+        \itemsep -6pt {}
+        {% for bullet in e.responsibilities %}
+            \item {{ latex_escape(bullet) }}
+        {% endfor %}
+    \end{itemize}
+  {% endfor %}
+\end{experienceSection}
+{% endif %}
+
+% --------- Certificates / Other work experience -----------
+{% if certificates %}
+\begin{experienceSection}{Certificates}
+  {% for c in certificates %}
+    \experienceItem[
+        company={{{ latex_escape(c.company | default('')) }}},
+        location={{{ latex_escape(c.location | default('')) }}},
+        position={{{ latex_escape(c.position | default('')) }}},
+        duration={{{ latex_escape(c.duration | default('')) }}}
+    ]
+    \begin{itemize}
+        \vspace{-0.2em}
+        \itemsep -6pt {}
+        {% for bullet in c.details | default([]) %}
+            \item {{ latex_escape(bullet) }}
+        {% endfor %}
+    \end{itemize}
+  {% endfor %}
+\end{experienceSection}
+{% endif %}
+
+% --------- Achievements / Activities / Projects -----------
+{% if achievements %}
+\begin{experienceSection}{Achievements}
+  {% for a in achievements %}
+    \projectItem[
+        title={{{ latex_escape(a.title | default(a.project | default(''))) }}},
+        keyHighlight={{{ latex_escape(a.keyHighlight | default('')) }}},
+        duration={{{ latex_escape(a.duration | default('')) }}}
+    ]
+    \begin{itemize}
+        \vspace{-0.5em}
+        \itemsep -6pt {}
+        {% for bullet in a.details | default([]) %}
+            \item {{ latex_escape(bullet) }}
+        {% endfor %}
+    \end{itemize}
+  {% endfor %}
+\end{experienceSection}
+{% endif %}
+
+\end{document}
