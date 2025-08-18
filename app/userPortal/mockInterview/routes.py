@@ -1672,3 +1672,147 @@ def complete_attempt(attempt_id):
     except Exception as e:
         logger.error(f"Error completing attempt: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
+
+# New backend endpoint
+@mock_interview_bp.route('/sessions/count', methods=['GET'])
+@require_authentication
+def get_user_sessions_count():
+    """Get total count of user's sessions - lightweight endpoint"""
+    try:
+        admin_client = get_admin_client()
+        
+        count_result = admin_client.table('mock_interview')\
+            .select('id', count='exact')\
+            .eq('user_id', g.user.id)\
+            .execute()
+        
+        total_count = getattr(count_result, 'count', 0)
+        
+        return jsonify({
+            'total_sessions': total_count,
+            'user_id': g.user.id[:8] + '***'  # For debugging
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting session count: {str(e)}")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@mock_interview_bp.route('/sessions/stats', methods=['GET'])
+@require_authentication
+def get_user_sessions_stats():
+    """Get comprehensive stats for user's mock interview sessions"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Get total sessions count
+        sessions_count_result = admin_client.table('mock_interview')\
+            .select('id', count='exact')\
+            .eq('user_id', user_id)\
+            .execute()
+        
+        total_sessions = getattr(sessions_count_result, 'count', 0)
+        
+        # Get all attempts for this user with feedback and duration data
+        attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('id, status, feedback, evaluation_score, actual_duration_minutes, mock_interview_id')\
+            .execute()
+        
+        # Filter attempts for this user's sessions
+        user_sessions_result = admin_client.table('mock_interview')\
+            .select('id')\
+            .eq('user_id', user_id)\
+            .execute()
+        
+        user_session_ids = [s['id'] for s in user_sessions_result.data] if user_sessions_result.data else []
+        
+        attempts = [a for a in (attempts_result.data or []) if a.get('mock_interview_id') in user_session_ids]
+        
+        # Filter completed attempts (status = 'PROCESSED')
+        completed_attempts = [a for a in attempts if a.get('status') == 'PROCESSED']
+        
+        # Count sessions with completed attempts
+        sessions_with_completed = set(a['mock_interview_id'] for a in completed_attempts)
+        completed_sessions_count = len(sessions_with_completed)
+        
+        # Calculate average score from feedback JSON
+        scores = []
+        total_duration_minutes = 0
+        
+        for attempt in completed_attempts:
+            # Extract score from feedback JSON
+            if attempt.get('feedback'):
+                try:
+                    feedback_data = attempt['feedback']
+                    if isinstance(feedback_data, str):
+                        import json
+                        feedback_data = json.loads(feedback_data)
+                    
+                    # Extract score from feedback (e.g., "7/10", "8.5/10")
+                    score_text = feedback_data.get('Score', '')
+                    if score_text:
+                        # Parse "X/10" format
+                        score_parts = score_text.split('/')
+                        if score_parts and len(score_parts) >= 1:
+                            try:
+                                numeric_score = float(score_parts[0].strip())
+                                scores.append(numeric_score)
+                            except ValueError:
+                                pass
+                except Exception as e:
+                    logger.warning(f"Error parsing feedback for attempt {attempt['id']}: {e}")
+            
+            # Fallback to evaluation_score if no feedback score
+            elif attempt.get('evaluation_score'):
+                eval_score = attempt['evaluation_score']
+                if eval_score <= 10:
+                    scores.append(eval_score)
+                else:
+                    # Convert percentage to rating out of 10
+                    scores.append((eval_score / 100) * 10)
+            
+            # Add duration
+            if attempt.get('actual_duration_minutes'):
+                total_duration_minutes += attempt['actual_duration_minutes']
+        
+        # Calculate average score
+        avg_score = 0
+        if scores:
+            avg_score = sum(scores) / len(scores)
+            avg_score = round(avg_score, 1)  # Round to 1 decimal place
+        
+        # Convert total time to hours and minutes
+        total_hours = total_duration_minutes // 60
+        remaining_minutes = total_duration_minutes % 60
+        
+        # Prepare response
+        stats = {
+            'total_sessions': total_sessions,
+            'completed_sessions': completed_sessions_count,
+            'avg_score': avg_score,
+            'avg_score_display': f"{avg_score}/10" if scores else "0/10",
+            'total_time_minutes': total_duration_minutes,
+            'total_time_hours': total_hours,
+            'total_time_display': f"{total_hours}h {remaining_minutes}m",
+            'total_attempts': len(attempts),
+            'completed_attempts': len(completed_attempts),
+            'scores_count': len(scores)
+        }
+        
+        logger.info(f"Stats for user {user_id[:8]}***: {stats}")
+        
+        return jsonify({
+            'stats': stats,
+            'debug': {
+                'total_attempts_found': len(attempts),
+                'completed_attempts_found': len(completed_attempts),
+                'scores_extracted': len(scores),
+                'sample_scores': scores[:5] if scores else []
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user session stats: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return jsonify({'error': 'Internal server error'}), 500
