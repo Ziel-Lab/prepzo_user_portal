@@ -3,7 +3,7 @@ name: Build and Deploy to EC2
 on:
   push:
     branches:
-      - main
+      - dev
 
 jobs:
   build-and-deploy:
@@ -11,20 +11,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
-      - name: Free up disk space
-        run: |
-          echo "Before cleanup:"
-          df -h
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /opt/microsoft
-          docker system prune -af --volumes || true
-          echo "After cleanup:"
-          df -h
       
       - name: Determine short SHA
         id: vars
@@ -44,89 +30,54 @@ jobs:
       - name: Build, tag, and push image to ECR
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
-          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REGISTRY: ${{ secrets.ECR_DEV_REGISTRY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_DEV_REPOSITORY }}
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
       - name: Deploy to EC2 with rollback
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@v0.1.6
         with:
-          host: ${{ secrets.EC2_HOST }}
+          host: ${{ secrets.EC2_DEV_HOST }}
           username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
+          key: ${{ secrets.EC2_DEV_SSH_KEY }}
           script: |
             set -e
-
             IMAGE_TAG=${{ steps.vars.outputs.sha_short }}
-            ECR_REGISTRY=${{ secrets.ECR_REGISTRY }}
-            ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY }}
-            CONTAINER_NAME=prepzo-prod
+            ECR_REGISTRY=${{ secrets.ECR_DEV_REGISTRY }}
+            ECR_REPOSITORY=${{ secrets.ECR_DEV_REPOSITORY }}
+            CONTAINER_NAME=prepzo-dev
             PORT=5000
-
             echo "Deploying image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
             # Login to ECR
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin $ECR_REGISTRY
-
             # Check if previous tag file exists
             if [ -f ~/previous_image_tag.txt ]; then
               PREVIOUS_IMAGE_TAG=$(cat ~/previous_image_tag.txt)
-              echo "Previous image tag found: $PREVIOUS_IMAGE_TAG"
             else
               PREVIOUS_IMAGE_TAG=""
-              echo "No previous image tag found"
             fi
-
             # Deploy new container
-            echo "Pulling new image..."
             docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-            
-            echo "Stopping existing container..."
             docker stop $CONTAINER_NAME || true
             docker rm $CONTAINER_NAME || true
-            
-            echo "Starting new container..."
             docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
             
-            # Wait for container to start
-            echo "Waiting for container to start..."
-            sleep 10
-            
-            # Check if container is running
-            if docker ps | grep $CONTAINER_NAME; then
-              echo "Container is running, checking health..."
-              
-              # Multiple health check attempts
-              HEALTH_SUCCESS=false
-              for i in {1..6}; do
-                echo "Health check attempt $i/6..."
-                if curl -f -s http://localhost:$PORT/health; then
-                  HEALTH_SUCCESS=true
-                  break
-                fi
-                sleep 5
-              done
-              
-              if [ "$HEALTH_SUCCESS" = true ]; then
-                echo "$IMAGE_TAG" > ~/previous_image_tag.txt
-                echo "Deployment successful."
-              else
-                echo "Health check failed after 6 attempts. Rolling back..."
-                docker stop $CONTAINER_NAME || true
-                docker rm $CONTAINER_NAME || true
-                
-                if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
-                  echo "Rolling back to previous image: $PREVIOUS_IMAGE_TAG"
-                  docker run -d --restart always -p 127.0.0.1:$PORT:$PORT --name $CONTAINER_NAME $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
-                  echo "Rollback completed"
-                else
-                  echo "No previous image to roll back to."
-                fi
-                exit 1
-              fi
+            # Health-check & rollback
+            sleep 5 
+            if curl -f http://localhost:$PORT/health; then
+              echo "$IMAGE_TAG" > ~/previous_image_tag.txt
+              echo "✅ Deployment successful.🔥"
             else
-              echo "Container failed to start"
-              exit 1
+              echo "❌ Health check failed. Rolling back..."
+              docker stop $CONTAINER_NAME || true
+              docker rm   $CONTAINER_NAME || true
+              if [ -n "$PREVIOUS_IMAGE_TAG" ]; then
+                docker run -d --restart always \
+                  -p 127.0.0.1:$PORT:$PORT \
+                  --name $CONTAINER_NAME \
+                  $ECR_REGISTRY/$ECR_REPOSITORY:$PREVIOUS_IMAGE_TAG
+              else
+                echo "⚠️ No previous image to roll back to."
+              fi
             fi
