@@ -60,6 +60,7 @@ def create_app():
         # Allow requests from all Vercel preview deployments, localhost, and custom domains
         allowed_origins_regex = [
             r"https://prepzo-client-.*\.vercel\.app",
+            r"https://prepzo-client-git-dev-prepzo.vercel.app",
             r"http://localhost:.*",
             "https://prepzo.ai",
             "https://www.prepzo.ai",
