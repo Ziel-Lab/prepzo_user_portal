@@ -233,7 +233,7 @@ def get_job_details():
         # -------------------------------------------------------------------
         try:
             cached_res = extensions.supabase.table("revealed_jobs").select("job_details").eq("user_id", current_user_id).eq("job_id", job_id).maybe_single().execute()
-            if cached_res.data and cached_res.data.get("job_details"):
+            if cached_res is not None and cached_res.data and cached_res.data.get("job_details"):
                 current_app.logger.info(f"Serving cached job details for job_id {job_id} and user {current_user_id}")
                 return jsonify(cached_res.data.get("job_details")), 200
         except Exception as e:
