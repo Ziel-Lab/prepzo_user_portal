@@ -88,8 +88,6 @@ def get_subscription_status():
         if subscription.get('usage') is None:
             subscription['usage'] = {}
 
-        current_app.logger.info(f"--- FINAL SUBSCRIPTION DATA SENT TO FRONTEND ---")
-        current_app.logger.info(json.dumps(subscription, indent=2, default=str))
         return jsonify(subscription), 200
         
     except Exception as e:
@@ -389,7 +387,6 @@ def stripe_webhook():
                     current_app.logger.error(error_message)
                     return jsonify({"status": "error", "message": "User record not found"}), 500
 
-                current_app.logger.info(f"✅ Successfully updated subscription record for user {user_id[:8]}*** with Stripe IDs")
                 
                 # Log to subscription history for audit trail
                 updated_record = res.data[0]
