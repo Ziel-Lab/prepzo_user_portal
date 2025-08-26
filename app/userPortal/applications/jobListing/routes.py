@@ -448,3 +448,36 @@ def update_job_status():
             exc_info=True,
         )
         return jsonify({"error": "Could not update job status."}), 500 
+
+@job_listing_bp.route("/ai-job-search", methods=["POST", "OPTIONS"])
+@require_authentication
+def ai_job_search():
+    """Endpoint to forward a prompt to the n8n AI job search webhook and return its response."""
+    if request.method == "OPTIONS":
+        # Handle CORS pre-flight
+        response = jsonify({"message": "CORS preflight"})
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response, 200
+
+    try:
+        data = request.get_json(silent=True) or {}
+        prompt = data.get("prompt")
+        if not prompt:
+            return jsonify({"error": "Missing 'prompt' in request body."}), 400
+
+        n8n_webhook_url = "https://prepzo.app.n8n.cloud/webhook/a3b6a2b0-471f-4ed1-a89b-7440c4b9356d"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        payload = {"prompt": prompt}
+        n8n_response = requests.post(n8n_webhook_url, headers=headers, json=payload, timeout=60)
+        n8n_response.raise_for_status()
+        return jsonify(n8n_response.json()), n8n_response.status_code
+    except requests.exceptions.HTTPError as http_err:
+        return jsonify({"error": "n8n webhook request failed", "details": str(http_err)}), http_err.response.status_code if http_err.response else 500
+    except Exception as e:
+        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500 
