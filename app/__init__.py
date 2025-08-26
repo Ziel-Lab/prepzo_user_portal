@@ -75,7 +75,7 @@ def create_app():
                     break
         
         response.headers['Access-Control-Allow-Credentials'] = 'true'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With, ngrok-skip-browser-warning'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, PATCH, DELETE'
         
         # Handle preflight (OPTIONS) requests
@@ -115,7 +115,7 @@ def create_app():
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
     app.register_blueprint(profile_bp)
-    app.register_blueprint(mock_interview_bp)
+    app.register_blueprint(mock_interview_bp, url_prefix='/mockInterview')
 
     # Fallback route for auth hook without /auth prefix (compatibility)
     @app.route('/custom-access-token-hook', methods=['POST'])
