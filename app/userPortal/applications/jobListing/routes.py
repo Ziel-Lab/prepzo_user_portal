@@ -23,6 +23,29 @@ from app.utils.amplitude import job_reveal_event, job_search_event, amplitude_id
 #     return resp
 # ---------------------------------------------------------------------------
 
+# In-memory store for demo purposes (replace with persistent store for production)
+n8n_push_store = {}
+
+@job_listing_bp.route("/n8n-push", methods=["POST"])
+def n8n_push():
+    """Endpoint for n8n to push data to the backend."""
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Missing 'user_id' in payload."}), 400
+    n8n_push_store[user_id] = data
+    return jsonify({"message": "Data received and stored.", "user_id": user_id}), 200
+
+@job_listing_bp.route("/n8n-push", methods=["GET"])
+@require_authentication
+def get_n8n_push():
+    """Frontend fetches the latest data pushed by n8n for the current user."""
+    user_id = str(g.user.id)
+    data = n8n_push_store.get(user_id)
+    if not data:
+        return jsonify({"message": "No data available for this user."}), 404
+    return jsonify(data), 200
+
 @job_listing_bp.route("/search-jobs", methods=["POST", "OPTIONS"])
 @require_authentication
 def search_jobs():
