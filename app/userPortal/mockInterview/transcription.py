@@ -101,7 +101,7 @@ class TranscriptionHandler:
         try:
             # Update session status
             self.supabase.table('mock_interview_sessions').update({
-                'status': 'completed',
+                'status': 'COMPLETED',
                 'ended_at': datetime.now(timezone.utc).isoformat(),
                 'updated_at': datetime.now(timezone.utc).isoformat()
             }).eq('id', session_id).execute()

@@ -114,7 +114,7 @@ async def store_interview_results(room_name: str, interview_results: dict):
             'transcript': interview_results.get('transcript', []),
             'feedback': interview_results.get('feedback', {}),
             'evaluation_score': interview_results.get('score'),
-            'status': 'completed'
+            'status': 'COMPLETED'
         }
         
         # Only update duration if not already set

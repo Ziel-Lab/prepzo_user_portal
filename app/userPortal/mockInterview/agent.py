@@ -287,17 +287,36 @@ class SimpleMockInterviewAgent(Agent):
             if response.data:
                 current_status = response.data[0].get('status', 'pending')
                 
-                if current_status not in ['completed', 'PROCESSED']:
-                    logger.info(f"Force-completing unfinished interview (status: {current_status})")
-                    await mark_interview_completed(self.attempt_id, "agent disconnected - auto-completed")
+                if current_status not in ['COMPLETED', 'failed', 'error']:
+                    logger.info(f"Force-failing unfinished interview (status: {current_status})")
+                    await mark_interview_failed(self.attempt_id, "agent disconnected - force failed")
+                else:
+                    logger.info(f"Interview already in final state: {current_status}")
                 
         except Exception as e:
             logger.error(f"Error in exit completion: {e}")
-            # Always try to mark as completed to prevent stuck sessions
+            # CRITICAL: Always try to mark as failed to prevent stuck sessions
+            # Use direct database update as final fallback
             try:
-                await mark_interview_completed(self.attempt_id, "agent exit error - force completed")
-            except:
-                pass
+                await mark_interview_failed(self.attempt_id, "agent exit error - force failed")
+            except Exception as fallback_error:
+                logger.error(f"Fallback completion also failed: {fallback_error}")
+                # Last resort: direct database update without helper function
+                try:
+                    from ...extensions import get_admin_client
+                    admin_client = get_admin_client()
+                    admin_client.table('mock_interview_attempts')\
+                        .update({
+                            'status': 'failed',
+                            'completed_at': 'now()',
+                            'updated_at': 'now()'
+                        })\
+                        .eq('id', self.attempt_id)\
+                        .execute()
+                    logger.warning(f"Used last resort database update for attempt {self.attempt_id}")
+                except Exception as last_resort_error:
+                    logger.critical(f"CRITICAL: All cleanup methods failed for attempt {self.attempt_id}: {last_resort_error}")
+                    # This should trigger alerts in production
         
         # STRICT MODE: Must send RPC before allowing exit
         if not self._rpc_sent_successfully:
@@ -360,7 +379,7 @@ class SimpleMockInterviewAgent(Agent):
                             connection_state = str(self._ctx.room.connection_state)
                             if connection_state in ['DISCONNECTED', 'FAILED']:
                                 logger.warning(f"Connection lost (state: {connection_state}) - ending interview early")
-                                await mark_interview_completed(self.attempt_id, f"connection lost - {connection_state}")
+                                await mark_interview_failed(self.attempt_id, f"connection lost - {connection_state}")
                                 await self.end_interview(f"connection lost - {connection_state}")
                                 return
                             elif connection_state == 'RECONNECTING':
@@ -375,16 +394,16 @@ class SimpleMockInterviewAgent(Agent):
             
             # If we reach here, timeout was reached
             logger.info("12-minute timeout reached - auto-ending interview")
-            await mark_interview_completed(self.attempt_id, "timeout - session duration limit reached")
+            await mark_interview_failed(self.attempt_id, "timeout - session duration limit reached")
             await self.end_interview("timeout - session duration limit reached")
             
         except asyncio.CancelledError:
             logger.info("Timeout handler cancelled - session ended naturally")
         except Exception as e:
             logger.error(f"Error in timeout handler: {e}")
-            # Force completion on any error to prevent stuck sessions
+            # Force failure on any error to prevent stuck sessions
             try:
-                await mark_interview_completed(self.attempt_id, f"timeout handler error - {str(e)}")
+                await mark_interview_failed(self.attempt_id, f"timeout handler error - {str(e)}")
             except:
                 pass
     
@@ -394,8 +413,8 @@ class SimpleMockInterviewAgent(Agent):
         try:
             logger.info(f"Ending interview with strict RPC: {reason}")
             
-            # Step 1: Mark interview as completed in database
-            await mark_interview_completed(self.attempt_id, reason)
+            # Step 1: Mark interview as successfully completed in database
+            await mark_interview_successful(self.attempt_id, reason)
             
             # Step 2: Quick goodbye message (if context available)
             if context and hasattr(context, 'session'):
@@ -617,8 +636,8 @@ async def save_live_transcription(attempt_id: str, speaker_type: str, speaker_na
         logger.error(f"Full traceback: {traceback.format_exc()}")
 
 
-async def mark_interview_completed(attempt_id: str, reason: str = "Interview completed"):
-    """Mark the interview attempt as completed with proper status and duration calculation"""
+async def mark_interview_failed(attempt_id: str, reason: str = "Interview failed"):
+    """Mark the interview attempt as FAILED - only for failures and errors"""
     try:
         from ...extensions import get_admin_client
         admin_client = get_admin_client()
@@ -637,11 +656,11 @@ async def mark_interview_completed(attempt_id: str, reason: str = "Interview com
         current_status = attempt_data.get('status', 'pending')
         started_at = attempt_data.get('started_at')
         
-        logger.info(f"Marking interview attempt {attempt_id} as completed. Current status: {current_status}")
+        logger.info(f"Marking interview attempt {attempt_id} as FAILED. Current status: {current_status}, reason: {reason}")
         
         # Only update status if not already in final state
-        if current_status in ['completed', 'PROCESSED']:
-            logger.info(f"Attempt {attempt_id} already in final state ({current_status}), skipping completion")
+        if current_status in ['COMPLETED', 'failed', 'error']:
+            logger.info(f"Attempt {attempt_id} already in final state ({current_status}), skipping failure marking")
             return
         
         # Calculate actual duration in minutes
@@ -661,15 +680,22 @@ async def mark_interview_completed(attempt_id: str, reason: str = "Interview com
         else:
             logger.warning(f"No started_at timestamp for attempt {attempt_id}, cannot calculate duration")
         
-        # Update status to completed
+        # Determine failure type - agent failures are ALWAYS 'failed', regardless of duration
+        final_status = 'failed'
+        
+        # Agent disconnections, timeouts, and system failures should ALWAYS be 'failed'
+        # The 3-minute rule only applies to user-initiated completions, not system failures
+        logger.warning(f"System/agent failure detected - marking as failed: {reason}")
+        
+        # Update status based on conditions
         update_data = {
-            'status': 'completed',
+            'status': final_status,
             'completed_at': 'now()',
             'actual_duration_minutes': actual_duration_minutes,
             'updated_at': 'now()'
         }
         
-        logger.info(f"Marking attempt {attempt_id} as completed (duration: {actual_duration_minutes} minutes, reason: {reason})")
+        logger.info(f"Marking attempt {attempt_id} as {final_status} (duration: {actual_duration_minutes} minutes, reason: {reason})")
         
         update_response = admin_client.table('mock_interview_attempts')\
             .update(update_data)\
@@ -677,12 +703,116 @@ async def mark_interview_completed(attempt_id: str, reason: str = "Interview com
             .execute()
         
         if update_response.data:
-            logger.info(f"Successfully marked attempt {attempt_id} as completed")
+            logger.info(f"Successfully marked attempt {attempt_id} as {final_status}")
+            
+            # For certain failure types (early agent failures), consider cleanup
+            if "agent disconnected" in reason.lower() or "dispatch" in reason.lower() or "timeout" in reason.lower():
+                logger.info(f"Considering cleanup for failed attempt {attempt_id} due to agent/system failure")
+                # Note: Cleanup logic would be called from routes.py where database access is easier
+                # This is just marking - the routes.py handles cleanup decisions
+        else:
+            logger.error(f"Failed to mark attempt {attempt_id} as {final_status} - no data returned from update")
+            
+    except Exception as e:
+        logger.error(f"Error marking interview as failed: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+
+
+async def mark_interview_successful(attempt_id: str, reason: str = "Interview completed successfully"):
+    """Mark the interview attempt as successfully COMPLETED - only for normal successful completions"""
+    try:
+        from ...extensions import get_admin_client
+        admin_client = get_admin_client()
+        
+        # Get current attempt data including started_at for duration calculation
+        response = admin_client.table('mock_interview_attempts')\
+            .select('status, started_at')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not response.data:
+            logger.warning(f"No attempt found with id {attempt_id}")
+            return
+        
+        attempt_data = response.data[0]
+        current_status = attempt_data.get('status', 'pending')
+        started_at = attempt_data.get('started_at')
+        
+        logger.info(f"Marking interview attempt {attempt_id} as SUCCESSFULLY COMPLETED. Current status: {current_status}")
+        
+        # Only update status if not already in final state
+        if current_status in ['COMPLETED', 'failed', 'error']:
+            logger.info(f"Attempt {attempt_id} already in final state ({current_status}), skipping successful completion")
+            return
+        
+        # Calculate actual duration in minutes
+        actual_duration_minutes = 0
+        if started_at:
+            try:
+                from datetime import datetime
+                logger.info(f"Calculating duration for attempt {attempt_id}: started_at='{started_at}'")
+                started_at_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                current_time = datetime.utcnow().replace(tzinfo=started_at_dt.tzinfo)
+                duration_seconds = (current_time - started_at_dt).total_seconds()
+                actual_duration_minutes = max(0, int(duration_seconds / 60))  # Convert to minutes, minimum 0
+                logger.info(f"Duration calculation for attempt {attempt_id}: {duration_seconds} seconds = {actual_duration_minutes} minutes")
+            except Exception as duration_error:
+                logger.warning(f"Error calculating duration for attempt {attempt_id}: {duration_error}")
+                actual_duration_minutes = 0
+        else:
+            logger.warning(f"No started_at timestamp for attempt {attempt_id}, cannot calculate duration")
+        
+        # For successful completions, ensure minimum duration was met
+        if actual_duration_minutes < 3:
+            logger.warning(f"Successful completion attempted but duration too short ({actual_duration_minutes}min) - marking as error instead")
+            # For user-initiated completions that are too short, mark as 'error' directly
+            from ...extensions import get_admin_client
+            admin_client = get_admin_client()
+            
+            update_data = {
+                'status': 'error',
+                'completed_at': 'now()',
+                'actual_duration_minutes': actual_duration_minutes,
+                'updated_at': 'now()'
+            }
+            
+            update_response = admin_client.table('mock_interview_attempts')\
+                .update(update_data)\
+                .eq('id', attempt_id)\
+                .execute()
+            
+            if update_response.data:
+                logger.info(f"Successfully marked attempt {attempt_id} as error (too short: {actual_duration_minutes} minutes)")
+            else:
+                logger.error(f"Failed to mark attempt {attempt_id} as error")
+            return
+        
+        # Mark as COMPLETED for successful sessions
+        final_status = 'COMPLETED'
+        
+        # Update status - successful completion
+        update_data = {
+            'status': final_status,
+            'completed_at': 'now()',
+            'actual_duration_minutes': actual_duration_minutes,
+            'updated_at': 'now()'
+        }
+        
+        logger.info(f"Marking attempt {attempt_id} as SUCCESSFULLY COMPLETED (duration: {actual_duration_minutes} minutes, reason: {reason})")
+        
+        update_response = admin_client.table('mock_interview_attempts')\
+            .update(update_data)\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if update_response.data:
+            logger.info(f"Successfully marked attempt {attempt_id} as COMPLETED")
         else:
             logger.error(f"Failed to mark attempt {attempt_id} as completed - no data returned from update")
             
     except Exception as e:
-        logger.error(f"Error marking interview completed: {e}")
+        logger.error(f"Error marking interview as successfully completed: {e}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
 
@@ -824,6 +954,7 @@ def main():
                 entrypoint_fnc=entrypoint,
                 port=8081,  # Debug port
                 # No agent_name = automatic dispatch enabled (1 agent per room)
+                # LiveKit handles concurrent rooms automatically
             )
             logger.info("Starting Simple LiveKit agent worker...")
             agents.cli.run_app(worker_options)
