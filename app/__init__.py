@@ -114,7 +114,7 @@ def create_app():
     app.register_blueprint(linkedin_optimizer_bp)
     app.register_blueprint(job_listing_bp)
     app.register_blueprint(profile_bp)
-    app.register_blueprint(mock_interview_bp)
+    app.register_blueprint(mock_interview_bp, url_prefix='/mockInterview')
 
     # Fallback route for auth hook without /auth prefix (compatibility)
     @app.route('/custom-access-token-hook', methods=['POST'])
