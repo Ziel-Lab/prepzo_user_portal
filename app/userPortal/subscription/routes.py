@@ -56,7 +56,6 @@ def get_subscription_status():
             # The initial upsert might not return data if there was a conflict.
             # If so, re-fetch the now-guaranteed-to-exist subscription record.
             if not (sub_insert_res and sub_insert_res.data):
-                current_app.logger.warning(f"Upsert for user {uid} returned no data (likely a resolved race condition), re-fetching.")
                 sub_res = supabase.table('user_subscriptions').select('*').eq('user_id', uid).maybe_single().execute()
                 subscription = sub_res.data if sub_res else None
                 if not subscription:
@@ -72,7 +71,6 @@ def get_subscription_status():
                     'started_at': user_sub_payload.get('current_period_start')
                 }
                 supabase.table('subscription_histories').insert(history_payload).execute()
-                current_app.logger.info(f"Successfully logged initial 'free' subscription history for user {uid}")
         
         # Step 3: Fetch the most recent usage record. check_and_use_feature will create one if needed.
         usage_res = supabase.table('feature_usage') \
@@ -91,7 +89,6 @@ def get_subscription_status():
         return jsonify(subscription), 200
         
     except Exception as e:
-        current_app.logger.error(f"An unexpected error occurred in /subscription/status: {e}", exc_info=True)
         return jsonify({"error": "An unexpected server error occurred."}), 500
 
 @subscription_bp.route("/customer-portal", methods=["POST", "OPTIONS"])
@@ -118,7 +115,6 @@ def create_customer_portal_session():
         
         frontend_url = current_app.config.get('FRONTEND_ORIGIN')
         if not frontend_url:
-             current_app.logger.error("FATAL: FRONTEND_ORIGIN is not configured on the server.")
              return jsonify({"error": "Application is not configured correctly. Unable to determine a return URL."}), 503
 
         return_url = f"{frontend_url}/dashboard/settings/subscription"
@@ -144,7 +140,6 @@ def create_customer_portal_session():
         return jsonify({"url": portal_session.url}), 200
 
     except Exception as e:
-        current_app.logger.error(f"Stripe customer portal session creation failed for user {uid}: {e}", exc_info=True)
         return jsonify({'error': "Could not create a billing management session."}), 500
 
 @subscription_bp.route("/invoices", methods=["GET"])
@@ -164,10 +159,8 @@ def get_invoices():
         return jsonify(history_response.data), 200
 
     except APIError as e:
-        current_app.logger.error(f"DATABASE API_ERROR in /subscription/invoices for user {uid}: {e}", exc_info=True)
         return jsonify({"error": "A database error occurred while fetching your billing history.", "details": str(e.message)}), 500
     except Exception as e:
-        current_app.logger.error(f"Subscription history fetching failed for user {uid}: {e}", exc_info=True)
         return jsonify({'error': "Could not retrieve billing history."}), 500
 
 @subscription_bp.route("/stripe/cancel-subscription", methods=["POST", "OPTIONS"])
@@ -222,14 +215,12 @@ def cancel_subscription():
             'next_billing_date': current_sub.get('next_billing_date')
         }
         supabase.table('subscription_histories').insert(history_payload).execute()
-        current_app.logger.info(f"Successfully logged 'canceling' subscription history for user {uid}")
 
         return jsonify({
             "message": "Subscription cancellation scheduled successfully."
         }), 200
 
     except Exception as e:
-        current_app.logger.error(f"Stripe cancellation failed: {e}")
         return jsonify({'error': str(e)}), 500
 
 @subscription_bp.route("/stripe/reactivate-subscription", methods=["POST"])
@@ -283,12 +274,10 @@ def reactivate_subscription():
             'next_billing_date': current_sub.get('next_billing_date')
         }
         supabase.table('subscription_histories').insert(history_payload).execute()
-        current_app.logger.info(f"Successfully logged 'active' (reactivated) subscription history for user {uid}")
 
         return jsonify({"message": "Subscription reactivated successfully."}), 200
 
     except Exception as e:
-        current_app.logger.error(f"Stripe reactivation failed for user {uid}: {e}", exc_info=True)
         return jsonify({'error': "Could not reactivate subscription."}), 500
 
 @subscription_bp.route("/stripe/webhook", methods=["POST"])
@@ -872,47 +861,6 @@ def stripe_webhook():
 
     return jsonify(success=True)
 
-@subscription_bp.route("/test-db-write", methods=["POST"])
-@require_authentication
-def test_db_write():
-    """
-    A temporary diagnostic endpoint to isolate database write failures.
-    It attempts a single UPSERT operation. If this fails, it proves that
-    the network environment is blocking POST/PATCH requests to Supabase.
-    """
-    supabase = extensions.supabase
-    uid = g.user.id
-    current_app.logger.info(f"--- DIAGNOSTIC: Testing database WRITE for user {uid} ---")
-    
-    try:
-        # We will attempt to 'upsert' a dummy record. 
-        # Using a non-existent date to avoid conflicts with real data.
-        period_start = "1999-01-01"
-        period_end = "1999-01-31"
-
-        test_payload = {
-            'user_id': uid, 
-            'period_start': period_start, 
-            'period_end': period_end,
-            'resume_count': 999 # A dummy value to indicate a test
-        }
-
-        # Use on_conflict to avoid errors if the row already exists from a previous test
-        response = supabase.table('feature_usage').upsert(
-            test_payload, 
-            on_conflict='user_id'
-        ).execute()
-
-        current_app.logger.info(f"--- DIAGNOSTIC: Database WRITE successful. Response: {response.data} ---")
-        return jsonify({"message": "Database write successful.", "data": response.data}), 200
-
-    except APIError as e:
-        current_app.logger.error(f"--- DIAGNOSTIC: Database WRITE FAILED with APIError. This strongly suggests a network block on POST/PATCH requests. Details: {e}", exc_info=True)
-        return jsonify({"error": "Database write failed.", "details": str(e)}), 500
-    except Exception as e:
-        current_app.logger.error(f"--- DIAGNOSTIC: Database WRITE FAILED with an unexpected exception. Details: {e}", exc_info=True)
-        return jsonify({"error": "An unexpected error occurred during the database write test.", "details": str(e)}), 500
-
 @subscription_bp.route("/config", methods=["GET"])
 @require_authentication
 def get_config():
@@ -1016,251 +964,4 @@ def create_checkout_session():
         current_app.logger.error(f"Error creating checkout session for user {user_id}: {e}", exc_info=True)
         return jsonify(error={'message': f"An unexpected error occurred: {str(e)}"}), 500
 
-@subscription_bp.route("/mock-interviews", methods=["GET", "OPTIONS"])
-@require_authentication
-def get_user_mock_interviews():
-    """
-    Get user's mock interview attempts with their current status and feedback
-    """
-    supabase = extensions.supabase
-    uid = g.user.id
-    
-    try:
-        # Get user's mock interview attempts
-        result = supabase.table('mock_interview_attempts').select('*')\
-            .eq('mock_interview_id', uid)\
-            .order('created_at', desc=True)\
-            .execute()
-        
-        interviews = result.data if result.data else []
-        
-        # Process and format the data for frontend
-        formatted_interviews = []
-        for interview in interviews:
-            formatted_interview = {
-                'id': interview['id'],
-                'attempt_number': interview['attempt_number'],
-                'status': interview['status'],
-                'started_at': interview['started_at'],
-                'completed_at': interview['completed_at'],
-                'duration_minutes': interview.get('actual_duration_minutes'),
-                'evaluation_score': interview.get('evaluation_score'),
-                'has_feedback': interview['status'] == 'PROCESSED' and interview.get('feedback'),
-                'created_at': interview['created_at']
-            }
-            formatted_interviews.append(formatted_interview)
-        
-        return jsonify({
-            'interviews': formatted_interviews,
-            'total_attempts': len(interviews)
-        }), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Failed to get mock interviews for user {uid}: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to retrieve interview history'}), 500
-
-@subscription_bp.route("/mock-interviews/<attempt_id>/feedback", methods=["GET", "OPTIONS"])
-@require_authentication  
-def get_interview_feedback(attempt_id):
-    """
-    Get detailed feedback for a specific interview attempt
-    """
-    supabase = extensions.supabase
-    uid = g.user.id
-    
-    try:
-        # Get the specific interview attempt
-        result = supabase.table('mock_interview_attempts').select('*')\
-            .eq('id', attempt_id)\
-            .eq('mock_interview_id', uid)\
-            .single()\
-            .execute()
-        
-        if not result.data:
-            return jsonify({'error': 'Interview attempt not found'}), 404
-        
-        interview = result.data
-        
-        # Check if feedback is available
-        if interview['status'] != 'PROCESSED' or not interview.get('feedback'):
-            return jsonify({
-                'status': interview['status'],
-                'feedback_ready': False,
-                'message': 'Feedback is still being processed. Please check back in a few minutes.'
-            }), 202
-        
-        # Parse and format feedback JSON
-        try:
-            feedback_data = json.loads(interview['feedback']) if isinstance(interview['feedback'], str) else interview['feedback']
-        except json.JSONDecodeError:
-            current_app.logger.error(f"Invalid feedback JSON for interview {attempt_id}")
-            return jsonify({'error': 'Feedback data is corrupted'}), 500
-        
-        # Format feedback for motivational display
-        formatted_feedback = {
-            'interview_info': {
-                'id': interview['id'],
-                'attempt_number': interview['attempt_number'], 
-                'completed_at': interview['completed_at'],
-                'duration_minutes': interview.get('actual_duration_minutes'),
-                'room_name': interview.get('room_name')
-            },
-            'overall_score': {
-                'score': feedback_data.get('Score', 'N/A'),
-                'out_of': '10'  # Assuming 1-10 scale, adjust as needed
-            },
-            'strengths': feedback_data.get('Strengths of the interview', ''),
-            'opportunities': feedback_data.get('Opportunities of the interview', ''),
-            'areas_for_improvement': feedback_data.get('Weaknesses of the interview', ''),
-            'improvement_tips': feedback_data.get('How can questions be answered better', ''),
-            'practice_questions': feedback_data.get('additional_questions_and_answers', ''),
-            'threats': feedback_data.get('Threats of the interview', ''),
-            'feedback_ready': True,
-            'processed_at': interview.get('updated_at')
-        }
-        
-        return jsonify(formatted_feedback), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Failed to get feedback for interview {attempt_id}: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to retrieve interview feedback'}), 500
-
-@subscription_bp.route("/mock-interviews/<attempt_id>/status", methods=["GET", "OPTIONS"])
-@require_authentication
-def get_interview_status(attempt_id):
-    """
-    Check the processing status of a specific interview attempt
-    Useful for polling until feedback is ready
-    """
-    supabase = extensions.supabase
-    uid = g.user.id
-    
-    try:
-        result = supabase.table('mock_interview_attempts').select('id, status, evaluation_score, updated_at')\
-            .eq('id', attempt_id)\
-            .eq('mock_interview_id', uid)\
-            .single()\
-            .execute()
-        
-        if not result.data:
-            return jsonify({'error': 'Interview attempt not found'}), 404
-        
-        interview = result.data
-        
-        status_info = {
-            'id': interview['id'],
-            'status': interview['status'],
-            'feedback_ready': interview['status'] == 'PROCESSED',
-            'last_updated': interview['updated_at'],
-            'evaluation_score': interview.get('evaluation_score')
-        }
-        
-        # Add estimated processing time for user experience
-        if interview['status'] == 'completed':
-            status_info['estimated_completion'] = 'Processing typically takes 2-5 minutes'
-        
-        return jsonify(status_info), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Failed to get status for interview {attempt_id}: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to check interview status'}), 500
-
-@subscription_bp.route("/mock-interviews/start-session", methods=["POST", "OPTIONS"])
-@require_authentication
-def start_mock_interview_session():
-    """
-    Create a new mock interview attempt record when user starts an interview
-    """
-    supabase = extensions.supabase
-    uid = g.user.id
-    
-    try:
-        data = request.get_json()
-        interview_type = data.get('interview_type', 'general')
-        room_name = data.get('room_name')
-        
-        if not room_name:
-            return jsonify({'error': 'Room name is required'}), 400
-        
-        # Get user's next attempt number
-        attempts_result = supabase.table('mock_interview_attempts').select('attempt_number')\
-            .eq('mock_interview_id', uid)\
-            .order('attempt_number', desc=True)\
-            .limit(1)\
-            .execute()
-        
-        next_attempt = 1
-        if attempts_result.data:
-            next_attempt = attempts_result.data[0]['attempt_number'] + 1
-        
-        # Create new attempt record
-        attempt_data = {
-            'id': str(uuid.uuid4()),
-            'mock_interview_id': uid,
-            'attempt_number': next_attempt,
-            'room_name': room_name,
-            'status': 'active',
-            'started_at': datetime.now(timezone.utc).isoformat(),
-            'created_at': datetime.now(timezone.utc).isoformat()
-        }
-        
-        result = supabase.table('mock_interview_attempts').insert(attempt_data).execute()
-        
-        if result.data:
-            return jsonify({
-                'attempt_id': result.data[0]['id'],
-                'attempt_number': next_attempt,
-                'status': 'active',
-                'room_name': room_name
-            }), 201
-        else:
-            return jsonify({'error': 'Failed to create interview attempt'}), 500
-        
-    except Exception as e:
-        current_app.logger.error(f"Failed to start mock interview session for user {uid}: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to start interview session'}), 500
-
-@subscription_bp.route("/mock-interviews/<attempt_id>/complete", methods=["POST", "OPTIONS"])
-@require_authentication
-def complete_mock_interview_session(attempt_id):
-    """
-    Mark an interview attempt as completed, triggering N8N processing
-    """
-    supabase = extensions.supabase
-    uid = g.user.id
-    
-    try:
-        data = request.get_json()
-        transcript_data = data.get('transcript', {})
-        live_transcription_data = data.get('live_transcription', {})
-        duration_minutes = data.get('duration_minutes', 0)
-        
-        # Update the attempt record
-        update_data = {
-            'status': 'completed',
-            'completed_at': datetime.now(timezone.utc).isoformat(),
-            'actual_duration_minutes': duration_minutes,
-            'transcript': json.dumps(transcript_data) if transcript_data else None,
-            'live_transcription': json.dumps(live_transcription_data) if live_transcription_data else None,
-            'updated_at': datetime.now(timezone.utc).isoformat()
-        }
-        
-        result = supabase.table('mock_interview_attempts').update(update_data)\
-            .eq('id', attempt_id)\
-            .eq('mock_interview_id', uid)\
-            .execute()
-        
-        if result.data:
-            current_app.logger.info(f"Mock interview {attempt_id} completed for user {uid}")
-            return jsonify({
-                'message': 'Interview completed successfully',
-                'status': 'completed',
-                'processing_message': 'Your feedback is being generated and will be ready in a few minutes.'
-            }), 200
-        else:
-            return jsonify({'error': 'Interview attempt not found'}), 404
-        
-    except Exception as e:
-        current_app.logger.error(f"Failed to complete mock interview {attempt_id} for user {uid}: {e}", exc_info=True)
-        return jsonify({'error': 'Failed to complete interview session'}), 500
 

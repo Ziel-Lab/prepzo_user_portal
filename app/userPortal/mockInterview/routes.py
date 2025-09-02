@@ -48,6 +48,98 @@ def execute_with_retry(query_func, operation_name="database query", max_retries=
 
 
 
+def cleanup_failed_attempt(attempt_id: str, reason: str = "Agent dispatch failed") -> bool:
+    """
+    Delete failed attempts from database so they don't count as real attempts
+    Only handles 'failed' status - system/agent failures that shouldn't count against user
+    """
+    try:
+        admin_client = get_admin_client()
+        
+        # First verify the attempt exists and has 'failed' status
+        check_result = admin_client.table('mock_interview_attempts')\
+            .select('id, status, attempt_number, mock_interview_id')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        if not check_result.data:
+            logger.warning(f"Attempt {attempt_id} not found for cleanup")
+            return False
+        
+        attempt_data = check_result.data[0]
+        current_status = attempt_data.get('status')
+        
+        # Only cleanup 'failed' status attempts (system failures)
+        if current_status != 'failed':
+            logger.info(f"Attempt {attempt_id} has status '{current_status}' - not cleaning up (only 'failed' attempts are cleaned)")
+            return False
+        
+        attempt_number = attempt_data.get('attempt_number')
+        session_id = attempt_data.get('mock_interview_id')
+        
+        logger.info(f"Cleaning up failed attempt {attempt_id} (attempt #{attempt_number}) - reason: {reason}")
+        
+        # Delete the failed attempt from database
+        logger.info(f"Attempting to delete attempt {attempt_id} from database...")
+        try:
+            # Try method 1: Standard delete
+            delete_result = admin_client.table('mock_interview_attempts')\
+                .delete()\
+                .eq('id', attempt_id)\
+                .execute()
+        except Exception as e1:
+            logger.warning(f"Standard delete failed: {e1}")
+            try:
+                # Try method 2: Delete with count
+                delete_result = admin_client.table('mock_interview_attempts')\
+                    .delete(count='exact')\
+                    .eq('id', attempt_id)\
+                    .execute()
+            except Exception as e2:
+                logger.error(f"All delete methods failed: {e1}, {e2}")
+                raise e2
+        
+        logger.info(f"Delete operation result for {attempt_id}: {delete_result}")
+        
+        # Verify deletion was successful
+        verify_result = admin_client.table('mock_interview_attempts')\
+            .select('id')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        logger.info(f"Verification check for {attempt_id}: found {len(verify_result.data)} records")
+        
+        if len(verify_result.data) == 0:
+            logger.info(f"Successfully deleted failed attempt {attempt_id} - this attempt won't count against user's limit")
+            
+            # Update attempt numbers for remaining attempts in this session
+            remaining_attempts_result = admin_client.table('mock_interview_attempts')\
+                .select('id, attempt_number')\
+                .eq('mock_interview_id', session_id)\
+                .order('attempt_number', desc=False)\
+                .execute()
+            
+            if remaining_attempts_result.data:
+                # Renumber remaining attempts to fill the gap
+                for i, remaining_attempt in enumerate(remaining_attempts_result.data, 1):
+                    if remaining_attempt['attempt_number'] != i:
+                        admin_client.table('mock_interview_attempts')\
+                            .update({'attempt_number': i})\
+                            .eq('id', remaining_attempt['id'])\
+                            .execute()
+                        logger.info(f"Renumbered attempt {remaining_attempt['id']} to #{i}")
+            
+            return True
+        else:
+            logger.error(f"Failed to delete attempt {attempt_id} - record still exists in database")
+            logger.error(f"Remaining record: {verify_result.data}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error cleaning up failed attempt {attempt_id}: {e}")
+        return False
+
+
 def get_display_status(status, status_prep):
     """
     Compute user-friendly display status based on status and status_prep
@@ -60,7 +152,7 @@ def get_display_status(status, status_prep):
         dict with display_status and is_ready_to_join
     """
     # Handle completed and failed states first
-    if status in ['completed']:
+    if status in ['COMPLETED']:
         return {
             'display_status': 'completed',
             'display_text': 'Completed',
@@ -664,17 +756,57 @@ def join_interview_session(session_id):
         
         existing_attempts = attempts_result.data if attempts_result.data else []
         
-        # Check for stuck attempts (active for more than 15 minutes) and mark them as failed
+        # Check for stuck attempts and orphaned sessions - improved logic
         from datetime import datetime, timedelta
         current_time = datetime.utcnow()
         
         for attempt in existing_attempts:
-            if attempt['status'] == 'active' and attempt.get('started_at'):
-                try:
-                    started_at = datetime.fromisoformat(attempt['started_at'].replace('Z', '+00:00'))
-                    if current_time - started_at.replace(tzinfo=None) > timedelta(minutes=15):
-                        logger.warning(f"Found stuck attempt {attempt['id']} - marking as failed")
-                        
+            if attempt['status'] == 'active':
+                should_recover = False
+                recovery_reason = ""
+                
+                if attempt.get('started_at'):
+                    try:
+                        started_at = datetime.fromisoformat(attempt['started_at'].replace('Z', '+00:00'))
+                        # Reduced timeout to 10 minutes for better UX
+                        if current_time - started_at.replace(tzinfo=None) > timedelta(minutes=10):
+                            should_recover = True
+                            recovery_reason = f"timeout (>10min) - started at {started_at}"
+                    except Exception as date_error:
+                        logger.warning(f"Invalid started_at date for attempt {attempt['id']}: {date_error}")
+                        should_recover = True
+                        recovery_reason = "invalid started_at timestamp"
+                else:
+                    # No started_at means the session was created but never properly started
+                    should_recover = True
+                    recovery_reason = "no started_at timestamp"
+                
+                # Additional check: verify if LiveKit room actually exists
+                if not should_recover and attempt.get('room_name'):
+                    try:
+                        from .api import get_room_participants
+                        participants = asyncio.run(get_room_participants(attempt['room_name']))
+                        # If room has no participants, it's effectively dead
+                        if len(participants) == 0:
+                            should_recover = True
+                            recovery_reason = "room exists but has no participants"
+                    except Exception as room_check_error:
+                        logger.warning(f"Could not check room status for {attempt['room_name']}: {room_check_error}")
+                        # If we can't check the room, assume it's dead after 5 minutes
+                        if attempt.get('started_at'):
+                            try:
+                                started_at = datetime.fromisoformat(attempt['started_at'].replace('Z', '+00:00'))
+                                if current_time - started_at.replace(tzinfo=None) > timedelta(minutes=5):
+                                    should_recover = True
+                                    recovery_reason = "room check failed and >5min elapsed"
+                            except:
+                                should_recover = True
+                                recovery_reason = "room check failed and invalid timestamp"
+                
+                if should_recover:
+                    logger.warning(f"Recovering stuck attempt {attempt['id']} - reason: {recovery_reason}")
+                    
+                    try:
                         # Mark stuck attempt as failed
                         admin_client.table('mock_interview_attempts')\
                             .update({
@@ -686,21 +818,33 @@ def join_interview_session(session_id):
                             .execute()
                         
                         # Try to cleanup the stuck room
-                        try:
-                            from .api import delete_room
-                            cleanup_success = asyncio.run(delete_room(attempt['room_name']))
-                            if cleanup_success:
-                                logger.info(f"Cleaned up stuck room: {attempt['room_name']}")
-                        except Exception as cleanup_error:
-                            logger.warning(f"Failed to cleanup stuck room {attempt['room_name']}: {cleanup_error}")
+                        if attempt.get('room_name'):
+                            try:
+                                from .api import delete_room
+                                cleanup_success = asyncio.run(delete_room(attempt['room_name']))
+                                if cleanup_success:
+                                    logger.info(f"Cleaned up stuck room: {attempt['room_name']}")
+                            except Exception as cleanup_error:
+                                logger.warning(f"Failed to cleanup stuck room {attempt['room_name']}: {cleanup_error}")
                         
-                        # Update local attempt status
-                        attempt['status'] = 'failed'
-                except Exception as recovery_error:
-                    logger.error(f"Error recovering stuck attempt {attempt['id']}: {recovery_error}")
+                        # Cleanup the failed attempt so it doesn't count against user's limit
+                        cleanup_success = cleanup_failed_attempt(attempt['id'], f"Stuck session recovery - {recovery_reason}")
+                        if cleanup_success:
+                            logger.info(f"Cleaned up stuck attempt {attempt['id']} - removed from database")
+                            # Remove from local list since it's deleted
+                            existing_attempts.remove(attempt)
+                        else:
+                            # Update local attempt status if cleanup failed
+                            attempt['status'] = 'failed'
+                            logger.warning(f"Could not cleanup stuck attempt {attempt['id']} - marked as failed")
+                        
+                        logger.info(f"Successfully recovered stuck attempt {attempt['id']}")
+                        
+                    except Exception as recovery_error:
+                        logger.error(f"Error recovering stuck attempt {attempt['id']}: {recovery_error}")
         
         # Refresh attempts list after recovery
-        completed_or_failed_attempts = [a for a in existing_attempts if a['status'] in ['completed', 'failed']]
+        completed_or_failed_attempts = [a for a in existing_attempts if a['status'] in ['COMPLETED', 'failed']]
         active_attempts = [a for a in existing_attempts if a['status'] == 'active']
         
         # Check if we can create a new attempt (max 3 attempts per session)
@@ -743,6 +887,26 @@ def join_interview_session(session_id):
         # Generate room token for the attempt room
         token = asyncio.run(get_room_token(attempt_room_name, g.user.id))
         if not token:
+            # Mark the attempt as failed since room token generation failed
+            attempt_id = attempt_result.data[0]['id']
+            admin_client.table('mock_interview_attempts')\
+                .update({
+                    'status': 'failed',
+                    'completed_at': 'now()',
+                    'updated_at': 'now()'
+                })\
+                .eq('id', attempt_id)\
+                .execute()
+            
+            logger.error(f"Failed to generate room token for attempt {attempt_id} - marked as failed")
+            
+            # Cleanup the failed attempt so it doesn't count against user's limit
+            cleanup_success = cleanup_failed_attempt(attempt_id, "Room token generation failed - agent dispatch failure")
+            if cleanup_success:
+                logger.info(f"Cleaned up failed attempt {attempt_id} - user can retry without penalty")
+            else:
+                logger.warning(f"Failed to cleanup attempt {attempt_id} - user may need manual assistance")
+            
             return jsonify({'error': 'Failed to generate room token'}), 500
         
         # Update session status and attempt status
@@ -1104,7 +1268,7 @@ def end_interview_session(session_id):
         
         # Update attempt with completion data (same logic as complete_attempt)
         update_data = {
-            'status': 'completed',
+            'status': 'COMPLETED',
             'completed_at': 'now()',
             'actual_duration_minutes': actual_duration_minutes,
             'updated_at': 'now()'
@@ -1122,7 +1286,7 @@ def end_interview_session(session_id):
         
         if result.data:
             return jsonify({
-                'status': 'completed',
+                'status': 'COMPLETED',
                 'message': 'Attempt completed successfully (via legacy endpoint)',
                 'deprecated_warning': 'This endpoint is deprecated. Use /attempt/<attempt_id>/complete',
                 'attempt': result.data[0]
@@ -1171,7 +1335,7 @@ def interview_completed_webhook():
         
         # Update session with completion data
         update_data = {
-            'status': 'completed',
+            'status': 'COMPLETED',
             'ended_at': 'now()',
             'updated_at': 'now()',
             'transcript': transcript,
@@ -1252,7 +1416,7 @@ def get_session_attempts(session_id):
         # Process and enhance attempts for frontend compatibility
         processed_attempts = []
         for attempt in raw_attempts:
-            # Status is already uppercase (PROCESSED, COMPLETED, ACTIVE, PENDING, etc.)
+            # Status is already uppercase (COMPLETED, ACTIVE, PENDING, etc.)
             status = attempt.get('status', 'PENDING')
             
             # Enhanced attempt object for frontend
@@ -1262,9 +1426,9 @@ def get_session_attempts(session_id):
                 'has_feedback': bool(attempt.get('feedback')),
                 'has_transcript': bool(attempt.get('transcript')),
                 'has_live_transcription': bool(attempt.get('live_transcription')),
-                'is_completed': status in ['COMPLETED', 'PROCESSED'],
-                'is_processed': status == 'PROCESSED',
-                'can_view_feedback': status in ['COMPLETED', 'PROCESSED'] and bool(attempt.get('feedback')),
+                'is_completed': status in ['COMPLETED'],
+                'is_processed': status in ['PROCESSED'] and bool(attempt.get('feedback')),
+                'can_view_feedback': status in ['PROCESSED'] and bool(attempt.get('feedback')),
                 'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
                 'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending'
             }
@@ -1320,9 +1484,9 @@ def get_attempt_data(attempt_id):
             'has_feedback': bool(attempt.get('feedback')),
             'has_transcript': bool(attempt.get('transcript')),
             'has_live_transcription': bool(attempt.get('live_transcription')),
-            'is_completed': attempt.get('status') in ['completed', 'COMPLETED', 'PROCESSED'],
-            'is_processed': attempt.get('status') == 'PROCESSED',
-            'can_view_feedback': attempt.get('status') in ['COMPLETED', 'PROCESSED'] and bool(attempt.get('feedback')),
+            'is_completed': attempt.get('status') in ['COMPLETED'],
+            'is_processed': attempt.get('status') in ['PROCESSED'] and bool(attempt.get('feedback')),
+            'can_view_feedback': attempt.get('status') in ['PROCESSED'] and bool(attempt.get('feedback')),
             'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
             'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending'
         }
@@ -1385,7 +1549,7 @@ def save_attempt_transcription(attempt_id):
             logger.warning(f"No started_at timestamp for attempt {attempt_id}, cannot calculate duration")
         
         # Update live transcription ONLY - do NOT mark as completed here
-        # Status should only be updated to 'completed' by explicit completion calls
+        # Status should only be updated to 'COMPLETED' by explicit completion calls
         update_data = {
             'live_transcription': json.dumps(live_transcription),
             'actual_duration_minutes': actual_duration_minutes,
@@ -1454,7 +1618,7 @@ def subscribe_to_attempt_updates(attempt_id):
                 'filter': f'id=eq.{attempt_id}',
                 'events': ['UPDATE'],
                 'watch_columns': ['status', 'feedback', 'evaluation_score'],
-                'target_status': 'PROCESSED',
+                'target_status': 'COMPLETED',
                 'attempt_id': attempt_id
             },
             'supabase_config': {
@@ -1486,22 +1650,48 @@ def get_realtime_token():
         return jsonify({'error': 'Internal server error'}), 500
 
 def extract_score_from_feedback(feedback_json):
-    """Extract numeric score from feedback JSON"""
+    """Extract numeric score from feedback JSON - enhanced version"""
     try:
         if isinstance(feedback_json, str):
             feedback_data = json.loads(feedback_json)
         else:
             feedback_data = feedback_json
             
-        # Get score field (e.g., "2/10", "7/10", etc.)
-        score_text = feedback_data.get('Score', '')
+        # Try multiple possible score field names and formats
+        score_fields = ['Score', 'score', 'overall_score', 'rating', 'evaluation_score']
         
-        if score_text:
-            # Extract number before "/" (e.g., "2" from "2/10")
-            score_parts = score_text.split('/')
-            if score_parts and score_parts[0].strip().isdigit():
-                return int(score_parts[0].strip())
+        for field in score_fields:
+            if field in feedback_data:
+                score_value = feedback_data[field]
                 
+                # Handle string format like "7/10", "8.5/10"
+                if isinstance(score_value, str):
+                    if '/' in score_value:
+                        score_parts = score_value.split('/')
+                        if score_parts and score_parts[0].strip():
+                            try:
+                                return float(score_parts[0].strip())
+                            except ValueError:
+                                continue
+                    else:
+                        # Try direct conversion for strings like "7", "8.5"
+                        try:
+                            return float(score_value.strip())
+                        except ValueError:
+                            continue
+                
+                # Handle numeric values directly
+                elif isinstance(score_value, (int, float)):
+                    return float(score_value)
+        
+        # If no direct score field, look for nested scoring
+        for key, value in feedback_data.items():
+            if isinstance(value, dict) and 'score' in value:
+                try:
+                    return float(value['score'])
+                except (ValueError, TypeError):
+                    continue
+                    
         return None
     except Exception as e:
         logger.warning(f"Error extracting score from feedback: {str(e)}")
@@ -1537,10 +1727,9 @@ def process_feedback(attempt_id):
         # Extract score from feedback
         evaluation_score = extract_score_from_feedback(feedback)
         
-        # Update attempt with feedback and extracted score
+        # Update attempt with feedback and extracted score - keep as completed
         update_data = {
             'feedback': json.dumps(feedback),
-            'status': 'PROCESSED',
             'updated_at': 'now()'
         }
         
@@ -1558,16 +1747,16 @@ def process_feedback(attempt_id):
         
         if update_result.data:
             processed_attempt = update_result.data[0]
-            logger.info(f"Processed feedback for attempt {attempt_id} with score {evaluation_score}")
+            logger.info(f"Added feedback for attempt {attempt_id} with score {evaluation_score}")
             
             return jsonify({
-                'message': 'Feedback processed successfully',
+                'message': 'Feedback added successfully',
                 'attempt': processed_attempt,
                 'evaluation_score': evaluation_score,
-                'status': 'PROCESSED'
+                'status': processed_attempt.get('status', 'COMPLETED')
             }), 200
         else:
-            return jsonify({'error': 'Failed to process feedback'}), 500
+            return jsonify({'error': 'Failed to add feedback'}), 500
         
     except Exception as e:
         logger.error(f"Error processing feedback: {str(e)}")
@@ -1576,7 +1765,7 @@ def process_feedback(attempt_id):
 @mock_interview_bp.route('/attempt/<attempt_id>/complete', methods=['POST'])
 @require_authentication
 def complete_attempt(attempt_id):
-    """Complete an attempt and save final transcript and metadata"""
+    """Complete an attempt and save final transcript and metadata - USER-INITIATED SUCCESSFUL COMPLETIONS ONLY"""
     try:
         data = request.get_json()
         transcript = data.get('transcript', {})
@@ -1600,7 +1789,7 @@ def complete_attempt(attempt_id):
         if attempt['mock_interview']['user_id'] != g.user.id:
             return jsonify({'error': 'Access denied'}), 403
         
-        if attempt['status'] in ['completed', 'PROCESSED']:
+        if attempt['status'] in ['COMPLETED', 'failed', 'error']:
             return jsonify({'error': f'Attempt already in final state: {attempt["status"]}'}), 400
         
         # Calculate actual duration if not provided
@@ -1616,9 +1805,18 @@ def complete_attempt(attempt_id):
                 logger.warning(f"Error calculating duration for attempt {attempt_id}: {duration_error}")
                 actual_duration_minutes = 0
         
+        # Determine final status based on duration - successful completion flow
+        final_status = 'COMPLETED'
+        
+        # If session ended within 3 minutes, mark as error
+        if actual_duration_minutes < 3:
+            final_status = 'error'
+            logger.warning(f"Session ended within 3 minutes ({actual_duration_minutes}min) - marking as error")
+            # Note: This is a successful user-initiated completion, but duration too short
+        
         # Update attempt with completion data
         update_data = {
-            'status': 'completed',
+            'status': final_status,
             'completed_at': 'now()',
             'actual_duration_minutes': actual_duration_minutes,
             'updated_at': 'now()'
@@ -1632,11 +1830,11 @@ def complete_attempt(attempt_id):
         if live_transcription:
             update_data['live_transcription'] = json.dumps(live_transcription)
         
-        # Handle feedback if provided in completion (immediate processing)
-        if feedback:
+        # Handle feedback if provided in completion 
+        if feedback and final_status != 'error':  # Don't process feedback for error sessions
             evaluation_score = extract_score_from_feedback(feedback)
             update_data['feedback'] = json.dumps(feedback)
-            update_data['status'] = 'PROCESSED'  # Mark as processed if feedback included
+            # Keep status as 'COMPLETED' - no PROCESSED status
             
             if evaluation_score is not None:
                 update_data['evaluation_score'] = evaluation_score
@@ -1649,21 +1847,25 @@ def complete_attempt(attempt_id):
         
         if update_result.data:
             completed_attempt = update_result.data[0]
-            status = 'PROCESSED' if feedback else 'completed'
+            status = update_data['status']  # Use the actual status we set
             logger.info(f"Completed attempt {attempt_id} with {actual_duration_minutes} minutes duration, status: {status}")
             
             response_data = {
-                'message': 'Attempt completed successfully',
+                'message': 'Interview session completed successfully' if status != 'error' else 'Session ended too early',
                 'attempt': completed_attempt,
                 'status': status,
-                'actual_duration_minutes': actual_duration_minutes
+                'actual_duration_minutes': actual_duration_minutes,
+                'completion_type': 'user_initiated'  # This is from frontend completion
             }
             
-            if feedback:
+            if status == 'error':
+                response_data['error_reason'] = 'Session duration was less than 3 minutes'
+                response_data['processing_message'] = 'Interview ended too early to provide meaningful feedback.'
+            elif feedback and status == 'COMPLETED':
                 response_data['evaluation_score'] = update_data.get('evaluation_score')
-                response_data['processing_message'] = 'Interview completed and feedback processed!'
+                response_data['processing_message'] = 'Interview completed successfully with feedback!'
             else:
-                response_data['processing_message'] = 'Your interview will be analyzed and feedback will be available soon.'
+                response_data['processing_message'] = 'Your interview was completed successfully! Analysis will be available soon.'
             
             return jsonify(response_data), 200
         else:
@@ -1728,48 +1930,69 @@ def get_user_sessions_stats():
         
         attempts = [a for a in (attempts_result.data or []) if a.get('mock_interview_id') in user_session_ids]
         
-        # Filter completed attempts (status = 'PROCESSED')
-        completed_attempts = [a for a in attempts if a.get('status') == 'PROCESSED']
+        # Filter PROCESSED attempts (these have feedback JSON with scores)
+        processed_attempts = [a for a in attempts if a.get('status') == 'PROCESSED']
         
-        # Count sessions with completed attempts
-        sessions_with_completed = set(a['mock_interview_id'] for a in completed_attempts)
-        completed_sessions_count = len(sessions_with_completed)
+        # Debug logging
+        logger.info(f"Stats query found {len(attempts)} total attempts for user, {len(processed_attempts)} PROCESSED attempts")
+        statuses = [a.get('status') for a in attempts]
+        logger.info(f"Attempt statuses found: {set(statuses)}")
+        if processed_attempts:
+            logger.info(f"PROCESSED attempt IDs: {[a.get('id') for a in processed_attempts]}")
+        else:
+            logger.warning("No PROCESSED attempts found - checking for other status variations")
+            # Check for lowercase processed or other variations
+            other_processed = [a for a in attempts if str(a.get('status', '')).lower() in ['processed']]
+            if other_processed:
+                logger.warning(f"Found {len(other_processed)} attempts with status variations: {[a.get('status') for a in other_processed]}")
+                processed_attempts = other_processed  # Use these instead
+        
+        # Count sessions with processed attempts
+        sessions_with_processed = set(a['mock_interview_id'] for a in processed_attempts)
+        completed_sessions_count = len(sessions_with_processed)
         
         # Calculate average score from feedback JSON
         scores = []
         total_duration_minutes = 0
         
-        for attempt in completed_attempts:
-            # Extract score from feedback JSON
+        for attempt in processed_attempts:
+            attempt_id = attempt.get('id', 'unknown')
+            logger.info(f"Processing attempt {attempt_id} - status: {attempt.get('status')}, has_feedback: {bool(attempt.get('feedback'))}, has_eval_score: {bool(attempt.get('evaluation_score'))}")
+            
+            # Extract score from feedback JSON using enhanced function
             if attempt.get('feedback'):
                 try:
-                    feedback_data = attempt['feedback']
-                    if isinstance(feedback_data, str):
-                        import json
-                        feedback_data = json.loads(feedback_data)
-                    
-                    # Extract score from feedback (e.g., "7/10", "8.5/10")
-                    score_text = feedback_data.get('Score', '')
-                    if score_text:
-                        # Parse "X/10" format
-                        score_parts = score_text.split('/')
-                        if score_parts and len(score_parts) >= 1:
+                    extracted_score = extract_score_from_feedback(attempt['feedback'])
+                    if extracted_score is not None:
+                        scores.append(extracted_score)
+                        logger.info(f"Extracted score {extracted_score} from feedback for attempt {attempt_id}")
+                    else:
+                        logger.warning(f"Could not extract score from feedback for attempt {attempt_id}")
+                        # Log the feedback structure for debugging
+                        if isinstance(attempt['feedback'], str):
                             try:
-                                numeric_score = float(score_parts[0].strip())
-                                scores.append(numeric_score)
-                            except ValueError:
-                                pass
+                                feedback_data = json.loads(attempt['feedback'])
+                                logger.warning(f"Feedback keys for attempt {attempt_id}: {list(feedback_data.keys())}")
+                            except:
+                                logger.warning(f"Invalid JSON in feedback for attempt {attempt_id}")
+                        else:
+                            logger.warning(f"Feedback keys for attempt {attempt_id}: {list(attempt['feedback'].keys()) if isinstance(attempt['feedback'], dict) else 'not a dict'}")
                 except Exception as e:
-                    logger.warning(f"Error parsing feedback for attempt {attempt['id']}: {e}")
+                    logger.warning(f"Error parsing feedback for attempt {attempt_id}: {e}")
             
             # Fallback to evaluation_score if no feedback score
             elif attempt.get('evaluation_score'):
                 eval_score = attempt['evaluation_score']
                 if eval_score <= 10:
                     scores.append(eval_score)
+                    logger.info(f"Used evaluation_score {eval_score} for attempt {attempt_id}")
                 else:
                     # Convert percentage to rating out of 10
-                    scores.append((eval_score / 100) * 10)
+                    converted_score = (eval_score / 100) * 10
+                    scores.append(converted_score)
+                    logger.info(f"Converted evaluation_score {eval_score}% to {converted_score}/10 for attempt {attempt_id}")
+            else:
+                logger.warning(f"No score available for attempt {attempt_id}")
             
             # Add duration
             if attempt.get('actual_duration_minutes'):
@@ -1795,7 +2018,7 @@ def get_user_sessions_stats():
             'total_time_hours': total_hours,
             'total_time_display': f"{total_hours}h {remaining_minutes}m",
             'total_attempts': len(attempts),
-            'completed_attempts': len(completed_attempts),
+            'completed_attempts': len(processed_attempts),
             'scores_count': len(scores)
         }
         
@@ -1805,7 +2028,7 @@ def get_user_sessions_stats():
             'stats': stats,
             'debug': {
                 'total_attempts_found': len(attempts),
-                'completed_attempts_found': len(completed_attempts),
+                'processed_attempts_found': len(processed_attempts),
                 'scores_extracted': len(scores),
                 'sample_scores': scores[:5] if scores else []
             }
@@ -1816,3 +2039,324 @@ def get_user_sessions_stats():
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
         return jsonify({'error': 'Internal server error'}), 500
+
+
+@mock_interview_bp.route('/cleanup-stuck-sessions', methods=['POST'])
+@require_authentication
+def cleanup_stuck_sessions():
+    """Manual cleanup endpoint for stuck sessions - useful for debugging and user support"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Get all active attempts for this user
+        active_attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('id, mock_interview_id, room_name, started_at, updated_at, mock_interview!inner(user_id)')\
+            .eq('status', 'active')\
+            .eq('mock_interview.user_id', user_id)\
+            .execute()
+        
+        if not active_attempts_result.data:
+            return jsonify({
+                'message': 'No stuck sessions found',
+                'cleaned_attempts': 0
+            }), 200
+        
+        cleaned_count = 0
+        from datetime import datetime, timedelta
+        current_time = datetime.utcnow()
+        
+        for attempt in active_attempts_result.data:
+            attempt_id = attempt['id']
+            room_name = attempt.get('room_name')
+            started_at = attempt.get('started_at')
+            
+            logger.info(f"Force cleaning stuck attempt {attempt_id}")
+            
+            try:
+                # Mark as failed
+                admin_client.table('mock_interview_attempts')\
+                    .update({
+                        'status': 'failed',
+                        'completed_at': 'now()',
+                        'updated_at': 'now()'
+                    })\
+                    .eq('id', attempt_id)\
+                    .execute()
+                
+                # Clean up room if it exists
+                if room_name:
+                    try:
+                        from .api import delete_room
+                        asyncio.run(delete_room(room_name))
+                        logger.info(f"Cleaned up room: {room_name}")
+                    except Exception as room_error:
+                        logger.warning(f"Failed to clean room {room_name}: {room_error}")
+                
+                cleaned_count += 1
+                logger.info(f"Successfully cleaned stuck attempt {attempt_id}")
+                
+            except Exception as cleanup_error:
+                logger.error(f"Failed to clean attempt {attempt_id}: {cleanup_error}")
+        
+        return jsonify({
+            'message': f'Cleaned up {cleaned_count} stuck sessions',
+            'cleaned_attempts': cleaned_count
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in cleanup endpoint: {e}")
+        return jsonify({'error': 'Failed to cleanup stuck sessions'}), 500
+
+
+@mock_interview_bp.route('/cleanup-failed-attempts', methods=['POST'])
+@require_authentication
+def cleanup_failed_attempts():
+    """Cleanup failed attempts for this user - removes them from database so they don't count as attempts"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Get all failed attempts for this user
+        failed_attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('id, attempt_number, mock_interview_id, created_at, mock_interview!inner(user_id, title)')\
+            .eq('status', 'failed')\
+            .eq('mock_interview.user_id', user_id)\
+            .execute()
+        
+        if not failed_attempts_result.data:
+            return jsonify({
+                'message': 'No failed attempts found to cleanup',
+                'cleaned_attempts': 0
+            }), 200
+        
+        cleaned_count = 0
+        cleanup_details = []
+        
+        for failed_attempt in failed_attempts_result.data:
+            attempt_id = failed_attempt['id']
+            session_title = failed_attempt['mock_interview']['title']
+            attempt_number = failed_attempt['attempt_number']
+            
+            logger.info(f"Cleaning up failed attempt {attempt_id} from session '{session_title}'")
+            
+            try:
+                cleanup_success = cleanup_failed_attempt(attempt_id, "Manual cleanup by user request")
+                if cleanup_success:
+                    cleaned_count += 1
+                    cleanup_details.append({
+                        'attempt_id': attempt_id,
+                        'session_title': session_title,
+                        'attempt_number': attempt_number,
+                        'status': 'cleaned'
+                    })
+                    logger.info(f"Successfully cleaned failed attempt {attempt_id}")
+                else:
+                    cleanup_details.append({
+                        'attempt_id': attempt_id,
+                        'session_title': session_title,
+                        'attempt_number': attempt_number,
+                        'status': 'failed_to_clean'
+                    })
+                    logger.warning(f"Failed to clean attempt {attempt_id}")
+                
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning failed attempt {attempt_id}: {cleanup_error}")
+                cleanup_details.append({
+                    'attempt_id': attempt_id,
+                    'session_title': session_title,
+                    'attempt_number': attempt_number,
+                    'status': 'error',
+                    'error': str(cleanup_error)
+                })
+        
+        return jsonify({
+            'message': f'Processed {len(failed_attempts_result.data)} failed attempts, cleaned {cleaned_count}',
+            'total_failed_found': len(failed_attempts_result.data),
+            'cleaned_attempts': cleaned_count,
+            'cleanup_details': cleanup_details,
+            'note': 'Cleaned attempts are permanently removed and won\'t count against your attempt limit'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in failed attempts cleanup endpoint: {e}")
+        return jsonify({'error': 'Failed to cleanup failed attempts'}), 500
+
+
+@mock_interview_bp.route('/debug/list-failed-attempts', methods=['GET'])
+@require_authentication
+def list_failed_attempts():
+    """List all failed attempts for this user to see what needs cleanup"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Get all failed attempts for this user
+        failed_attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('id, attempt_number, mock_interview_id, status, created_at, mock_interview!inner(user_id, title)')\
+            .eq('status', 'failed')\
+            .eq('mock_interview.user_id', user_id)\
+            .execute()
+        
+        return jsonify({
+            'user_id': user_id[:8] + '***',
+            'failed_attempts_count': len(failed_attempts_result.data),
+            'failed_attempts': failed_attempts_result.data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error listing failed attempts: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@mock_interview_bp.route('/debug/test-cleanup', methods=['POST'])
+@require_authentication
+def test_cleanup():
+    """Test cleanup function with detailed logging"""
+    try:
+        data = request.get_json()
+        attempt_id = data.get('attempt_id')
+        
+        if not attempt_id:
+            return jsonify({'error': 'attempt_id required'}), 400
+        
+        admin_client = get_admin_client()
+        
+        # Check if attempt exists before cleanup
+        before_result = admin_client.table('mock_interview_attempts')\
+            .select('id, status, attempt_number, mock_interview_id')\
+            .eq('id', attempt_id)\
+            .execute()
+        
+        logger.info(f"Before cleanup - attempt {attempt_id}: {before_result.data}")
+        
+        if not before_result.data:
+            return jsonify({
+                'error': 'Attempt not found',
+                'attempt_id': attempt_id
+            }), 404
+        
+        # Try to delete directly
+        try:
+            delete_result = admin_client.table('mock_interview_attempts')\
+                .delete()\
+                .eq('id', attempt_id)\
+                .execute()
+            
+            logger.info(f"Direct delete result for {attempt_id}: {delete_result}")
+            
+            # Check if it was actually deleted
+            after_result = admin_client.table('mock_interview_attempts')\
+                .select('id, status')\
+                .eq('id', attempt_id)\
+                .execute()
+            
+            logger.info(f"After cleanup check - attempt {attempt_id}: {after_result.data}")
+            
+            return jsonify({
+                'attempt_id': attempt_id,
+                'before_delete': before_result.data[0] if before_result.data else None,
+                'delete_result': str(delete_result),
+                'after_delete': after_result.data,
+                'deleted_successfully': len(after_result.data) == 0
+            }), 200
+            
+        except Exception as delete_error:
+            logger.error(f"Delete error for {attempt_id}: {delete_error}")
+            return jsonify({
+                'error': 'Delete failed',
+                'attempt_id': attempt_id,
+                'delete_error': str(delete_error)
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Test cleanup error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@mock_interview_bp.route('/debug/feedback-scores', methods=['GET'])
+@require_authentication
+def debug_feedback_scores():
+    """Debug endpoint to examine feedback and score extraction - focuses on PROCESSED attempts"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Get all attempts for this user with feedback
+        attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('id, status, feedback, evaluation_score, mock_interview_id')\
+            .execute()
+        
+        # Filter for this user's sessions
+        user_sessions_result = admin_client.table('mock_interview')\
+            .select('id')\
+            .eq('user_id', user_id)\
+            .execute()
+        
+        user_session_ids = [s['id'] for s in user_sessions_result.data] if user_sessions_result.data else []
+        user_attempts = [a for a in (attempts_result.data or []) if a.get('mock_interview_id') in user_session_ids]
+        
+        debug_info = []
+        scores_found = []
+        processed_attempts = [a for a in user_attempts if a.get('status') == 'PROCESSED']
+        
+        logger.info(f"Debug: Found {len(user_attempts)} total attempts, {len(processed_attempts)} PROCESSED")
+        
+        for attempt in user_attempts:
+            attempt_info = {
+                'id': attempt['id'],
+                'status': attempt.get('status'),
+                'has_feedback': bool(attempt.get('feedback')),
+                'has_evaluation_score': bool(attempt.get('evaluation_score')),
+                'evaluation_score': attempt.get('evaluation_score'),
+                'extracted_score': None,
+                'feedback_keys': None,
+                'feedback_sample': None
+            }
+            
+            if attempt.get('feedback'):
+                try:
+                    # Extract score
+                    extracted_score = extract_score_from_feedback(attempt['feedback'])
+                    attempt_info['extracted_score'] = extracted_score
+                    if extracted_score is not None:
+                        scores_found.append(extracted_score)
+                    
+                    # Get feedback structure
+                    if isinstance(attempt['feedback'], str):
+                        feedback_data = json.loads(attempt['feedback'])
+                    else:
+                        feedback_data = attempt['feedback']
+                    
+                    attempt_info['feedback_keys'] = list(feedback_data.keys())
+                    
+                    # Get a sample of the feedback for inspection
+                    sample = {}
+                    for key, value in feedback_data.items():
+                        if isinstance(value, str) and len(value) > 100:
+                            sample[key] = value[:100] + "..."
+                        else:
+                            sample[key] = value
+                    attempt_info['feedback_sample'] = sample
+                    
+                except Exception as e:
+                    attempt_info['error'] = str(e)
+            
+            debug_info.append(attempt_info)
+        
+        return jsonify({
+            'user_id': user_id[:8] + '***',
+            'total_attempts': len(user_attempts),
+            'processed_attempts': len(processed_attempts),
+            'attempts_with_feedback': len([a for a in user_attempts if a.get('feedback')]),
+            'processed_with_feedback': len([a for a in processed_attempts if a.get('feedback')]),
+            'scores_extracted': len(scores_found),
+            'average_score': sum(scores_found) / len(scores_found) if scores_found else 0,
+            'scores_found': scores_found,
+            'debug_details': debug_info,
+            'note': 'Only PROCESSED attempts should have feedback with scores'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {e}")
+        return jsonify({'error': str(e)}), 500
