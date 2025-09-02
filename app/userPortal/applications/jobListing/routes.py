@@ -505,3 +505,55 @@ def ai_job_search():
         return jsonify({"error": "n8n webhook request failed", "details": str(http_err)}), http_err.response.status_code if http_err.response else 500
     except Exception as e:
         return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500 
+
+@job_listing_bp.route("/create-saved-search", methods=["POST", "OPTIONS"])
+@require_authentication
+def create_saved_search():
+    """Allow only premium users to create a saved search in TheirStack API."""
+    if request.method == "OPTIONS":
+        response = jsonify({"message": "CORS preflight"})
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response, 200
+
+    user_id = str(g.user.id)
+    # Check if user is premium (plan_id == 3)
+    supabase = extensions.supabase
+    try:
+        sub_res = supabase.table('user_subscriptions').select('plan_id').eq('user_id', user_id).maybe_single().execute()
+        plan_id = sub_res.data['plan_id'] if sub_res and sub_res.data else 1
+        if plan_id != 3:
+            return jsonify({"error": "This feature is available to premium users only."}), 403
+    except Exception as e:
+        current_app.logger.error(f"Failed to check premium status for user {user_id}: {e}")
+        return jsonify({"error": "Could not verify subscription status."}), 500
+
+    # Forward the payload to TheirStack API
+    api_key = current_app.config.get("THEIRSTACK_API_KEY")
+    theirstack_url = current_app.config.get(
+        "THEIRSTACK_API_URL_SAVED_SEARCH", "https://api.theirstack.com/v1/saved_searches"
+    )
+    if not api_key:
+        return jsonify({"error": "Server misconfiguration: missing external API key."}), 500
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        response = requests.post(theirstack_url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.HTTPError as http_err:
+        try:
+            error_detail = http_err.response.json()
+        except Exception:
+            error_detail = http_err.response.text
+        return jsonify({"error": "TheirStack API request failed", "details": error_detail}), http_err.response.status_code if http_err.response else 500
+    except Exception as e:
+        current_app.logger.error(f"Error creating saved search for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500 
