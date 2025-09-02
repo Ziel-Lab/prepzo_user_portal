@@ -62,7 +62,7 @@ def search_jobs():
     current_user_id = str(g.user.id)
     api_key = current_app.config.get("THEIRSTACK_API_KEY")
     theirstack_url = current_app.config.get(
-        "THEIRSTACK_API_URL_JOBS_SEARCH", "https://api.theirstack.com/v0/jobs/search"
+        "THEIRSTACK_API_URL_JOBS_SEARCH", "https://api.theirstack.com/v1/jobs/search"
     )
 
     if not api_key:
