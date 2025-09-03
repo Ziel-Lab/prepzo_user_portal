@@ -1,4 +1,3 @@
-# routes.py
 from flask import request, jsonify, current_app, g
 from datetime import datetime, date, timedelta, timezone
 import stripe
