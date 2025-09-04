@@ -55,7 +55,7 @@ def get_linkedin_optimizer_history():
 
 @linkedin_optimizer_bp.route("/linkedin-optimizer/process-pdf", methods=["POST", "OPTIONS"])
 @require_authentication
-@check_and_use_feature("linkedin_optimizer")
+# @check_and_use_feature("linkedin_optimizer")
 def process_linkedin_pdf():
     """Process LinkedIn PDF by sending URL to webhook"""
     current_user_id = str(g.user.id)
