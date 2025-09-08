@@ -41,107 +41,99 @@ def require_authentication(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # Handle CORS preflight requests (OPTIONS)
+        # Handle CORS preflight requests
         if request.method == 'OPTIONS':
-            response = make_response("", 200)  # empty 200 OK response
-
+            response = make_response(jsonify(success=True))
+            
             origin = request.headers.get('Origin')
             if origin:
-                response.headers['Access-Control-Allow-Origin'] = origin
+                response.headers.add('Access-Control-Allow-Origin', origin)
             else:
-                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers.add('Access-Control-Allow-Origin', '*')
 
-            response.headers['Access-Control-Allow-Headers'] = (
-                'Content-Type, Authorization, X-Requested-With, ngrok-skip-browser-warning'
-            )
-            response.headers['Access-Control-Allow-Methods'] = (
-                'GET, POST, PUT, DELETE, OPTIONS, PATCH'
-            )
-            response.headers['Access-Control-Allow-Credentials'] = 'true'
-            response.headers['Vary'] = 'Origin'
-            return response
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
+            response.headers.add('Access-Control-Allow-Credentials', 'true')
+            return response, 204
 
         # Extract and validate JWT token
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
-            current_app.logger.warning(
-                f"Authentication failed: Missing or malformed Authorization header from IP {request.remote_addr}"
-            )
+            current_app.logger.warning(f"Authentication failed: Missing or malformed Authorization header from IP {request.remote_addr}")
             return jsonify({"error": "Missing or malformed Authorization header"}), 401
 
         jwt_token = auth_header.split(" ", 1)[1]
         if not jwt_token or len(jwt_token.split(".")) != 3:
-            current_app.logger.warning(
-                f"Authentication failed: Malformed JWT received from IP {request.remote_addr}"
-            )
+            current_app.logger.warning(f"Authentication failed: Malformed JWT received from IP {request.remote_addr}")
             return jsonify({"error": "Invalid token format"}), 401
 
         try:
             # Get both Supabase clients
             admin_client = extensions.get_admin_client()
             user_client = extensions.get_user_client()
-
+            
             # Use admin client to verify JWT token with retry for network issues
             user_response = _retry_auth_with_backoff(admin_client, jwt_token)
             user = user_response.user
             if not user or not user.id:
                 raise ValueError("Supabase did not return a user object in the response.")
-
+            
             # Set JWT token on user client for RLS context
+            # This ensures all subsequent operations are scoped to this user
             try:
+                # Set the auth header directly for RLS context
                 user_client.auth._headers["Authorization"] = f"Bearer {jwt_token}"
             except Exception as e:
                 current_app.logger.warning(f"Failed to set user client session: {e}")
-
+            
             # Store user and clients in Flask g for route access
             g.user = user
-            g.supabase = user_client
-            g.supabase_user = user_client
-            g.supabase_admin = admin_client
-
-            # Extract custom claims if available
+            g.supabase = user_client  # Default to user client for data operations
+            g.supabase_user = user_client  # Explicit user client
+            g.supabase_admin = admin_client  # Admin client for special operations
+            
+            # Extract custom claims from JWT if available (from Custom Access Token Hook)
             g.user_claims = {}
             try:
+                # Try to get custom claims from the user object
                 if hasattr(user, 'app_metadata') and user.app_metadata:
                     g.user_claims = user.app_metadata
                 elif hasattr(user, 'user_metadata') and user.user_metadata:
+                    # Fallback to user_metadata if app_metadata not available
                     g.user_claims = user.user_metadata
-
+                
+                # Validate token freshness if available
                 token_version = g.user_claims.get('token_version', 'legacy')
+                hook_processed_at = g.user_claims.get('hook_processed_at')
                 issued_at = g.user_claims.get('issued_at')
-
+                
+                # Check if token is stale (older than 24 hours) for v2+ tokens
                 if token_version != 'legacy' and issued_at:
                     token_age = time.time() - issued_at
-                    if token_age > 86400:  # 24h
-                        current_app.logger.info(
-                            f"Token for user {user.id[:8]}*** is {int(token_age/3600)}h old, may need refresh"
-                        )
+                    if token_age > 86400:  # 24 hours
+                        current_app.logger.info(f"Token for user {user.id[:8]}*** is {int(token_age/3600)}h old, may need refresh")
                         g.user_claims['token_age_hours'] = int(token_age / 3600)
-
+                
+                # Enhanced logging with security metrics
                 subscription_plan = g.user_claims.get('subscription_plan_id', 'unknown')
                 webhook_id = g.user_claims.get('webhook_id', 'N/A')
-                current_app.logger.info(
-                    f"Authentication successful for user {user.id[:8]}*** "
-                    f"(token: {token_version}, plan: {subscription_plan}, webhook: {webhook_id[:8]}***)"
-                )
-
+                current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** (token: {token_version}, plan: {subscription_plan}, webhook: {webhook_id[:8]}***) using dual-client architecture")
+                
             except Exception as e:
-                current_app.logger.warning(
-                    f"Could not extract custom claims for user {user.id[:8]}***: {e}"
-                )
+                current_app.logger.warning(f"Could not extract custom claims for user {user.id[:8]}***: {e}")
+                current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** using dual-client architecture")
 
         except AuthApiError as e:
             error_message = str(e).lower()
-            if any(x in error_message for x in [
-                "expired", "stale", "invalid claim",
-                "signature is invalid", "unable to parse or verify"
-            ]):
-                current_app.logger.warning(
-                    f"Authentication failed: Stale/Expired JWT from IP {request.remote_addr} - {type(e).__name__}"
-                )
+            
+            # Differentiate between different auth failures for frontend handling
+            # Enhanced error categorization for production
+            if ("expired" in error_message or "stale" in error_message or "invalid claim" in error_message or 
+                "signature is invalid" in error_message or "unable to parse or verify" in error_message):
+                current_app.logger.warning(f"Authentication failed: Stale/Expired JWT from IP {request.remote_addr} - {type(e).__name__}")
                 response = jsonify({
                     "error": "token_expired",
-                    "error_type": "stale_jwt",
+                    "error_type": "stale_jwt", 
                     "message": "Your session token has expired",
                     "action": "refresh_token",
                     "timestamp": int(time.time())
@@ -149,12 +141,8 @@ def require_authentication(f):
                 response.headers['Cache-Control'] = 'no-store'
                 response.headers['Pragma'] = 'no-cache'
                 return response, 401
-            elif any(x in error_message for x in [
-                "malformed", "not found", "invalid jwt"
-            ]):
-                current_app.logger.warning(
-                    f"Authentication failed: Invalid JWT from IP {request.remote_addr} - {type(e).__name__}"
-                )
+            elif "malformed" in error_message or "not found" in error_message or "invalid jwt" in error_message:
+                current_app.logger.warning(f"Authentication failed: Invalid JWT from IP {request.remote_addr} - {type(e).__name__}")
                 response = jsonify({
                     "error": "token_invalid",
                     "error_type": "invalid_jwt",
@@ -166,9 +154,7 @@ def require_authentication(f):
                 response.headers['Pragma'] = 'no-cache'
                 return response, 401
             elif "rate limit" in error_message or "too many" in error_message:
-                current_app.logger.warning(
-                    f"Authentication failed: Rate limited from IP {request.remote_addr}"
-                )
+                current_app.logger.warning(f"Authentication failed: Rate limited from IP {request.remote_addr}")
                 response = jsonify({
                     "error": "rate_limited",
                     "error_type": "rate_limit",
@@ -179,9 +165,8 @@ def require_authentication(f):
                 response.headers['Retry-After'] = '60'
                 return response, 429
             else:
-                current_app.logger.warning(
-                    f"Authentication failed: Unknown auth error from IP {request.remote_addr} - {type(e).__name__}: {str(e)}"
-                )
+                # Default to allowing refresh attempt for unknown errors
+                current_app.logger.warning(f"Authentication failed: Unknown auth error from IP {request.remote_addr} - {type(e).__name__}: {str(e)}")
                 response = jsonify({
                     "error": "token_expired",
                     "error_type": "stale_jwt",
@@ -192,11 +177,8 @@ def require_authentication(f):
                 response.headers['Cache-Control'] = 'no-store'
                 response.headers['Pragma'] = 'no-cache'
                 return response, 401
-
         except AuthRetryableError as e:
-            current_app.logger.error(
-                f"Authentication failed after retries due to network issues from IP {request.remote_addr}: {str(e)}"
-            )
+            current_app.logger.error(f"Authentication failed after retries due to network issues from IP {request.remote_addr}: {str(e)}")
             response = jsonify({
                 "error": "authentication_service_unavailable",
                 "error_type": "service_error",
@@ -206,12 +188,8 @@ def require_authentication(f):
             })
             response.headers['Retry-After'] = '5'
             return response, 503
-
         except APIError as e:
-            current_app.logger.error(
-                f"Authentication API call failed from IP {request.remote_addr}: {type(e).__name__}",
-                exc_info=True
-            )
+            current_app.logger.error(f"Authentication API call failed from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
             status_code = getattr(e, 'status', 401)
             response = jsonify({
                 "error": "authentication_api_error",
@@ -221,12 +199,8 @@ def require_authentication(f):
                 "timestamp": int(time.time())
             })
             return response, status_code
-
         except Exception as e:
-            current_app.logger.error(
-                f"Unexpected authentication error from IP {request.remote_addr}: {type(e).__name__}",
-                exc_info=True
-            )
+            current_app.logger.error(f"Unexpected authentication error from IP {request.remote_addr}: {type(e).__name__}", exc_info=True)
             response = jsonify({
                 "error": "internal_auth_error",
                 "error_type": "internal_error",
@@ -235,9 +209,9 @@ def require_authentication(f):
                 "timestamp": int(time.time())
             })
             return response, 500
-
+            
         return f(*args, **kwargs)
-
+            
     return decorated_function
 
 def get_user_display_name(user):

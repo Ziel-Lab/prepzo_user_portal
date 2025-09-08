@@ -1,3 +1,4 @@
+# routes.py
 from flask import request, jsonify, current_app, g
 from datetime import datetime, date, timedelta, timezone
 import stripe
@@ -962,5 +963,4 @@ def create_checkout_session():
     except Exception as e:
         current_app.logger.error(f"Error creating checkout session for user {user_id}: {e}", exc_info=True)
         return jsonify(error={'message': f"An unexpected error occurred: {str(e)}"}), 500
-
 

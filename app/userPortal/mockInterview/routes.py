@@ -1160,59 +1160,115 @@ def get_lightweight_stats():
     try:
         admin_client = get_admin_client()
         user_id = g.user.id
-        
-        # Get sessions with attempts
+
+        # include feedback, evaluation_score, actual_duration_minutes
         result = admin_client.table('mock_interview')\
             .select('''
                 id,
                 mock_interview_attempts(
                     status,
                     evaluation_score,
-                    actual_duration_minutes
+                    actual_duration_minutes,
+                    feedback,
+                    attempt_number
                 )
             ''')\
             .eq('user_id', user_id)\
             .execute()
-            
-        sessions = result.data if result.data else []
-        
-        # Calculate stats
+
+        sessions = result.data or []
+
         total_sessions = len(sessions)
         total_minutes = 0
         completed_sessions = 0
         all_scores = []
-        
+
         for session in sessions:
-            attempts = session.get('mock_interview_attempts', [])
-            if len(attempts) >= 3:
+            attempts = session.get('mock_interview_attempts') or []
+
+            # Completed definition per your latest message:
+            # session is completed if all 3 attempts are taken (i.e., at least 3 attempts exist)
+            if sum(1 for a in attempts if a.get('status') == 'PROCESSED') >= 3:
                 completed_sessions += 1
-                
+
+
             for attempt in attempts:
-                if attempt.get('actual_duration_minutes'):
-                    total_minutes += attempt['actual_duration_minutes']
-                    
-                if attempt.get('status') == 'PROCESSED' and attempt.get('evaluation_score'):
-                    score = attempt['evaluation_score']
-                    normalized_score = score if score <= 10 else score / 10.0
-                    all_scores.append(normalized_score)
-        
-        avg_score = sum(all_scores) / len(all_scores) if all_scores else 0
+                # accumulate total time (regardless of status) if present
+                minutes = attempt.get('actual_duration_minutes')
+                if minutes is not None:
+                    try:
+                        total_minutes += int(float(minutes))
+                    except Exception:
+                        logger.debug(f"Could not parse actual_duration_minutes: {minutes}")
+
+                # only consider PROCESSED attempts for scoring (so only finalized scores are used)
+                if attempt.get('status') != 'PROCESSED':
+                    continue
+
+                # find numeric score: prefer evaluation_score, fallback to feedback JSON
+                score_val = None
+                eval_score = attempt.get('evaluation_score')
+                if eval_score not in (None, ''):
+                    try:
+                        score_val = float(eval_score)
+                    except Exception:
+                        logger.debug(f"Could not parse evaluation_score: {eval_score}")
+
+                if score_val is None:
+                    fb = attempt.get('feedback')
+                    fb_parsed = {}
+                    if fb:
+                        # feedback may be dict or a JSON string
+                        if isinstance(fb, str):
+                            try:
+                                fb_parsed = json.loads(fb)
+                            except Exception:
+                                # sometimes feedback can be a plain string — skip
+                                fb_parsed = {}
+                                logger.debug("feedback string is not valid JSON")
+                        elif isinstance(fb, dict):
+                            fb_parsed = fb
+
+                        # check typical keys for numeric score
+                        for key in ('Score', 'score', 'score_value', 'ScoreValue', 'evaluation_score'):
+                            if key in fb_parsed:
+                                try:
+                                    score_val = float(str(fb_parsed[key]).strip())
+                                    break
+                                except Exception:
+                                    logger.debug(f"Could not parse feedback['{key}'] = {fb_parsed.get(key)}")
+
+                # if we found a score, normalize to 0-10
+                if score_val is not None:
+                    if score_val > 10:
+                        # assume 0-100 -> convert to 0-10
+                        try:
+                            normalized = score_val / 10.0
+                        except Exception:
+                            normalized = score_val
+                    else:
+                        normalized = score_val
+                    # clamp
+                    normalized = max(0.0, min(10.0, normalized))
+                    all_scores.append(normalized)
+
+        avg_score = round(sum(all_scores) / len(all_scores), 1) if all_scores else 0.0
         total_hours = total_minutes // 60
         remaining_minutes = total_minutes % 60
-        
+
         return jsonify({
             'stats': {
                 'total_sessions': total_sessions,
                 'completed_sessions': completed_sessions,
-                'avg_score': round(avg_score, 1),
-                'avg_score_display': f"{round(avg_score, 1)}/10",
+                'avg_score': avg_score,
+                'avg_score_display': f"{avg_score}/10",
                 'total_time_minutes': total_minutes,
                 'total_time_display': f"{total_hours}h {remaining_minutes}m"
             }
         }), 200
-        
+
     except Exception as e:
-        logger.error(f"Error in lightweight stats: {str(e)}")
+        logger.exception("Error in lightweight stats")
         return jsonify({'error': 'Failed to fetch stats'}), 500
 
 @mock_interview_bp.route('/user-limits', methods=['GET'])
