@@ -28,6 +28,10 @@ def upload_document():
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"error": "No selected file"}), 400
+    
+    # Check file extension for PDF
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({"error": "Only PDF files are allowed"}), 400
 
     document_type = request.form.get("document_type")
     if not document_type:
@@ -40,10 +44,58 @@ def upload_document():
     if len(file.filename) > 255:
         return jsonify({"error": "Filename too long"}), 400
 
-    # Sanitize filename for security
-    safe_filename = "".join(c for c in file.filename if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+    dangerous_chars = set('/\\:*?"<>|')
+    if any(c in dangerous_chars for c in file.filename):
+        return jsonify({"error": "Filename contains invalid characters. The following characters are not allowed: / \\ : * ? \" < > |"}), 400
+
+    # Create timestamp once for consistency
+    timestamp = str(int(time.time()))
+
+    # Sanitize filename for security - allow foreign language characters
+    # Allow alphanumeric, common punctuation, spaces, and Unicode characters (for foreign languages)
+    safe_filename = "".join(c for c in file.filename if c.isalnum() or c in (' ', '.', '_', '-', '(', ')', '[', ']', '&', '+', ',', ';', '=', '@', '#', '%', '!', '?') or ord(c) > 127).rstrip()
     if not safe_filename:
         safe_filename = f"document_{timestamp}"
+
+    # Create storage-safe filename using comprehensive sanitization
+    import unicodedata
+    import re
+    
+    def sanitize_filename(filename):
+        """
+        Sanitize filename following the same logic as the TypeScript version:
+        - Normalize special characters (ä → a, é → e, etc.)
+        - Replace remaining non-ASCII characters with underscores
+        - Replace illegal characters with underscores
+        - Replace spaces with underscores
+        - Remove consecutive underscores
+        - Trim leading/trailing underscores
+        - Ensure length is within limits (255 chars)
+        """
+        # Normalize special characters (NFD = NFD, removes combining diacritical marks)
+        normalized = unicodedata.normalize('NFD', filename)
+        # Remove combining diacritical marks (accents)
+        without_accents = re.sub(r'[\u0300-\u036f]', '', normalized)
+        # Replace remaining non-ASCII characters with underscores
+        ascii_only = re.sub(r'[^\x00-\x7F]', '_', without_accents)
+        # Replace illegal characters with underscores
+        legal_chars = re.sub(r'[!*\'();:@&=+$,/?%#\[\]]', '_', ascii_only)
+        # Replace spaces with underscores
+        no_spaces = re.sub(r'\s+', '_', legal_chars)
+        # Remove consecutive underscores
+        no_consecutive = re.sub(r'_+', '_', no_spaces)
+        # Trim leading/trailing underscores
+        trimmed = re.sub(r'^_+|_+$', '', no_consecutive)
+        # Ensure length is within limits (255 chars)
+        return trimmed[:255]
+    
+    storage_safe_filename = sanitize_filename(safe_filename)
+    
+    # Check if filename becomes too short or empty after cleaning
+    if len(storage_safe_filename) < 3 or not storage_safe_filename.replace('.', '').replace('_', '').replace('-', ''):
+        return jsonify({
+            "error": "Please rename the file to contain only letters (a-z, A-Z), numbers (0-9), underscores (_), hyphens (-), and dots (.). Special characters and spaces are not allowed."
+        }), 400
 
     file_bytes = file.read()
     
@@ -53,21 +105,19 @@ def upload_document():
   
     flask_mimetype = file.mimetype
 
-    final_content_type_for_storage = flask_mimetype 
+    try:
+        magic_mimetype = magic.from_buffer(file_bytes, mime=True)
+        if magic_mimetype != 'application/pdf':
+            return jsonify({"error": "File content is not a valid PDF"}), 400
+    except Exception as e:
+        print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
+        if flask_mimetype != 'application/pdf':
+            return jsonify({"error": "File content is not a valid PDF"}), 400
 
-    if flask_mimetype == 'application/pdf':
-        final_content_type_for_storage = 'application/pdf'
-    else:
-        try:
-            magic_mimetype = magic.from_buffer(file_bytes, mime=True)
-            final_content_type_for_storage = magic_mimetype
-        except Exception as e:
-            print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
+    final_content_type_for_storage = 'application/pdf'
 
-
-    # Construct a unique path in storage using user ID, timestamp, and original filename
-    timestamp = str(int(time.time()))
-    storage_file_path = f"{current_user_id}/{timestamp}_{file.filename}"
+    # Construct a unique path in storage using user ID, timestamp, and storage-safe filename
+    storage_file_path = f"{current_user_id}/{timestamp}_{storage_safe_filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
     # Limit comment length

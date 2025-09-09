@@ -23,6 +23,29 @@ from app.utils.amplitude import job_reveal_event, job_search_event, amplitude_id
 #     return resp
 # ---------------------------------------------------------------------------
 
+# In-memory store for demo purposes (replace with persistent store for production)
+n8n_push_store = {}
+
+@job_listing_bp.route("/n8n-push", methods=["POST"])
+def n8n_push():
+    """Endpoint for n8n to push data to the backend."""
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return jsonify({"error": "Missing 'user_id' in payload."}), 400
+    n8n_push_store[user_id] = data
+    return jsonify({"message": "Data received and stored.", "user_id": user_id}), 200
+
+@job_listing_bp.route("/n8n-push", methods=["GET"])
+@require_authentication
+def get_n8n_push():
+    """Frontend fetches the latest data pushed by n8n for the current user."""
+    user_id = str(g.user.id)
+    data = n8n_push_store.get(user_id)
+    if not data:
+        return jsonify({"message": "No data available for this user."}), 404
+    return jsonify(data), 200
+
 @job_listing_bp.route("/search-jobs", methods=["POST", "OPTIONS"])
 @require_authentication
 def search_jobs():
@@ -233,7 +256,7 @@ def get_job_details():
         # -------------------------------------------------------------------
         try:
             cached_res = extensions.supabase.table("revealed_jobs").select("job_details").eq("user_id", current_user_id).eq("job_id", job_id).maybe_single().execute()
-            if cached_res.data and cached_res.data.get("job_details"):
+            if cached_res is not None and cached_res.data and cached_res.data.get("job_details"):
                 current_app.logger.info(f"Serving cached job details for job_id {job_id} and user {current_user_id}")
                 return jsonify(cached_res.data.get("job_details")), 200
         except Exception as e:
@@ -448,3 +471,89 @@ def update_job_status():
             exc_info=True,
         )
         return jsonify({"error": "Could not update job status."}), 500 
+
+@job_listing_bp.route("/ai-job-search", methods=["POST", "OPTIONS"])
+@require_authentication
+def ai_job_search():
+    """Endpoint to forward a prompt and user_id to the n8n AI job search webhook and return its response."""
+    if request.method == "OPTIONS":
+        # Handle CORS pre-flight
+        response = jsonify({"message": "CORS preflight"})
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response, 200
+
+    try:
+        data = request.get_json(silent=True) or {}
+        prompt = data.get("prompt")
+        if not prompt:
+            return jsonify({"error": "Missing 'prompt' in request body."}), 400
+
+        user_id = str(g.user.id)
+        n8n_webhook_url = "https://prepzo.app.n8n.cloud/webhook/a3b6a2b0-471f-4ed1-a89b-7440c4b9356d"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        payload = {"prompt": prompt, "user_id": user_id}
+        n8n_response = requests.post(n8n_webhook_url, headers=headers, json=payload, timeout=60)
+        n8n_response.raise_for_status()
+        return jsonify(n8n_response.json()), n8n_response.status_code
+    except requests.exceptions.HTTPError as http_err:
+        return jsonify({"error": "n8n webhook request failed", "details": str(http_err)}), http_err.response.status_code if http_err.response else 500
+    except Exception as e:
+        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500 
+
+@job_listing_bp.route("/create-saved-search", methods=["POST", "OPTIONS"])
+@require_authentication
+def create_saved_search():
+    """Allow only premium users to create a saved search in TheirStack API."""
+    if request.method == "OPTIONS":
+        response = jsonify({"message": "CORS preflight"})
+        response.headers.add("Access-Control-Allow-Origin", request.headers.get("Origin", "*"))
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "POST,OPTIONS")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+        return response, 200
+
+    user_id = str(g.user.id)
+    # Check if user is premium (plan_id == 3)
+    supabase = extensions.supabase
+    try:
+        sub_res = supabase.table('user_subscriptions').select('plan_id').eq('user_id', user_id).maybe_single().execute()
+        plan_id = sub_res.data['plan_id'] if sub_res and sub_res.data else 1
+        if plan_id != 3:
+            return jsonify({"error": "This feature is available to premium users only."}), 403
+    except Exception as e:
+        current_app.logger.error(f"Failed to check premium status for user {user_id}: {e}")
+        return jsonify({"error": "Could not verify subscription status."}), 500
+
+    # Forward the payload to TheirStack API
+    api_key = current_app.config.get("THEIRSTACK_API_KEY")
+    theirstack_url = current_app.config.get(
+        "THEIRSTACK_API_URL_SAVED_SEARCH", "https://api.theirstack.com/v0/saved_searches"
+    )
+    if not api_key:
+        return jsonify({"error": "Server misconfiguration: missing external API key."}), 500
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        response = requests.post(theirstack_url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        return jsonify(response.json()), response.status_code
+    except requests.exceptions.HTTPError as http_err:
+        try:
+            error_detail = http_err.response.json()
+        except Exception:
+            error_detail = http_err.response.text
+        return jsonify({"error": "TheirStack API request failed", "details": error_detail}), http_err.response.status_code if http_err.response else 500
+    except Exception as e:
+        current_app.logger.error(f"Error creating saved search for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "An unexpected error occurred", "details": str(e)}), 500 
