@@ -1450,7 +1450,7 @@ def get_attempt_data(attempt_id):
         
         # Get attempt data with session info
         attempt_result = admin_client.table('mock_interview_attempts')\
-            .select('*, mock_interview!inner(user_id, title, interview_type, position, company_name)')\
+            .select('*, mock_interview!inner(user_id, title, interview_type, position, company_name, created_at, actual_duration_minutes, completed_at)')\
             .eq('id', attempt_id)\
             .execute()
         
@@ -1473,7 +1473,10 @@ def get_attempt_data(attempt_id):
             'is_processed': attempt.get('status') in ['PROCESSED'] and bool(attempt.get('feedback')),
             'can_view_feedback': attempt.get('status') in ['PROCESSED'] and bool(attempt.get('feedback')),
             'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
-            'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending'
+            'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending',
+            'completed_at_display': attempt.get('completed_at') if attempt.get('completed_at') else 'N/A',
+            'created_at_display': attempt.get('created_at') if attempt.get('created_at') else 'N/A',
+            'actual_duration_minutes_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A'
         }
         
         return jsonify({
