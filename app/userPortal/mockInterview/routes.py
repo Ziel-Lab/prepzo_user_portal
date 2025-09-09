@@ -1392,7 +1392,7 @@ def get_session_attempts(session_id):
         # Get all attempts for this session with retry logic
         attempts_result = execute_with_retry(
             lambda: admin_client.table('mock_interview_attempts')\
-                .select('id, attempt_number, room_name, status, actual_duration_minutes, feedback')\
+                .select('id, attempt_number, room_name, status, actual_duration_minutes, feedback, completed_at, created_at')\
                 .eq('mock_interview_id', session_id)\
                 .order('attempt_number', desc=False),
             f"attempts query for session {session_id}"
@@ -1416,6 +1416,10 @@ def get_session_attempts(session_id):
                 'is_processed': status in ['PROCESSED'] and bool(attempt.get('feedback')),
                 'can_view_feedback': status in ['PROCESSED'] and bool(attempt.get('feedback')),
                 'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
+                'completed_at_display': attempt.get('completed_at') if attempt.get('completed_at') else 'N/A',
+                'created_at_display': attempt.get('created_at') if attempt.get('created_at') else 'N/A',
+                'actual_duration_minutes_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A'
+
             }
             
             processed_attempts.append(processed_attempt)
@@ -1935,9 +1939,29 @@ def get_user_sessions_stats():
                 logger.warning(f"Found {len(other_processed)} attempts with status variations: {[a.get('status') for a in other_processed]}")
                 processed_attempts = other_processed  # Use these instead
         
-        # Count sessions with processed attempts
-        sessions_with_processed = set(a['mock_interview_id'] for a in processed_attempts)
-        completed_sessions_count = len(sessions_with_processed)
+        # Count sessions where all 3 attempts are processed
+        attempts_by_session = {}
+        for attempt in attempts:
+            session_id = attempt.get('mock_interview_id')
+            if session_id not in attempts_by_session:
+                attempts_by_session[session_id] = []
+            attempts_by_session[session_id].append(attempt)
+        
+        # Only count sessions with all 3 attempts processed
+        completed_sessions = []
+        for session_id, session_attempts in attempts_by_session.items():
+            if (len(session_attempts) == 3 and 
+                all(a.get('status') == 'PROCESSED' for a in session_attempts)):
+                completed_sessions.append(session_id)
+        
+        completed_sessions_count = len(completed_sessions)
+        
+        # Log session completion details
+        logger.info(f"Found {len(attempts_by_session)} total sessions")
+        for session_id, session_attempts in attempts_by_session.items():
+            logger.info(f"Session {session_id}: {len(session_attempts)} attempts, "
+                      f"statuses: {[a.get('status') for a in session_attempts]}")
+        logger.info(f"Completed sessions (all 3 attempts PROCESSED): {completed_sessions_count}")
         
         # Calculate average score from feedback JSON
         scores = []
