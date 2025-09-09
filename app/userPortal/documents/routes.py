@@ -28,6 +28,10 @@ def upload_document():
     file = request.files["file"]
     if file.filename == "":
         return jsonify({"error": "No selected file"}), 400
+    
+    # Check file extension for PDF
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({"error": "Only PDF files are allowed"}), 400
 
     document_type = request.form.get("document_type")
     if not document_type:
@@ -39,6 +43,10 @@ def upload_document():
     
     if len(file.filename) > 255:
         return jsonify({"error": "Filename too long"}), 400
+
+    dangerous_chars = set('/\\:*?"<>|')
+    if any(c in dangerous_chars for c in file.filename):
+        return jsonify({"error": "Filename contains invalid characters. The following characters are not allowed: / \\ : * ? \" < > |"}), 400
 
     # Sanitize filename for security
     safe_filename = "".join(c for c in file.filename if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
@@ -53,16 +61,16 @@ def upload_document():
   
     flask_mimetype = file.mimetype
 
-    final_content_type_for_storage = flask_mimetype 
+    try:
+        magic_mimetype = magic.from_buffer(file_bytes, mime=True)
+        if magic_mimetype != 'application/pdf':
+            return jsonify({"error": "File content is not a valid PDF"}), 400
+    except Exception as e:
+        print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
+        if flask_mimetype != 'application/pdf':
+            return jsonify({"error": "File content is not a valid PDF"}), 400
 
-    if flask_mimetype == 'application/pdf':
-        final_content_type_for_storage = 'application/pdf'
-    else:
-        try:
-            magic_mimetype = magic.from_buffer(file_bytes, mime=True)
-            final_content_type_for_storage = magic_mimetype
-        except Exception as e:
-            print(f"Upload: Error calling python-magic: {str(e)}. Falling back to Flask's mimetype: {flask_mimetype}")
+    final_content_type_for_storage = 'application/pdf'
 
 
     # Construct a unique path in storage using user ID, timestamp, and original filename
