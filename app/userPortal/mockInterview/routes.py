@@ -1364,18 +1364,6 @@ def interview_completed_webhook():
         logger.error(f"Error processing interview completion webhook: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
-
-
-
-
-
-
-
-
- 
-
-
-
 @mock_interview_bp.route('/session/<session_id>/attempts', methods=['GET'])
 @require_authentication
 def get_session_attempts(session_id):
@@ -1404,7 +1392,7 @@ def get_session_attempts(session_id):
         # Get all attempts for this session with retry logic
         attempts_result = execute_with_retry(
             lambda: admin_client.table('mock_interview_attempts')\
-                .select('*')\
+                .select('id, attempt_number, room_name, status, actual_duration_minutes, feedback')\
                 .eq('mock_interview_id', session_id)\
                 .order('attempt_number', desc=False),
             f"attempts query for session {session_id}"
@@ -1424,13 +1412,10 @@ def get_session_attempts(session_id):
                 **attempt,
                 'status': status,
                 'has_feedback': bool(attempt.get('feedback')),
-                'has_transcript': bool(attempt.get('transcript')),
-                'has_live_transcription': bool(attempt.get('live_transcription')),
                 'is_completed': status in ['COMPLETED'],
                 'is_processed': status in ['PROCESSED'] and bool(attempt.get('feedback')),
                 'can_view_feedback': status in ['PROCESSED'] and bool(attempt.get('feedback')),
                 'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
-                'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending'
             }
             
             processed_attempts.append(processed_attempt)
