@@ -48,8 +48,12 @@ def upload_document():
     if any(c in dangerous_chars for c in file.filename):
         return jsonify({"error": "Filename contains invalid characters. The following characters are not allowed: / \\ : * ? \" < > |"}), 400
 
-    # Sanitize filename for security
-    safe_filename = "".join(c for c in file.filename if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+    # Create timestamp once for consistency
+    timestamp = str(int(time.time()))
+
+    # Sanitize filename for security - allow foreign language characters
+    # Allow alphanumeric, common punctuation, spaces, and Unicode characters (for foreign languages)
+    safe_filename = "".join(c for c in file.filename if c.isalnum() or c in (' ', '.', '_', '-', '(', ')', '[', ']', '&', '+', ',', ';', '=', '@', '#', '%', '!', '?') or ord(c) > 127).rstrip()
     if not safe_filename:
         safe_filename = f"document_{timestamp}"
 
@@ -72,9 +76,7 @@ def upload_document():
 
     final_content_type_for_storage = 'application/pdf'
 
-
     # Construct a unique path in storage using user ID, timestamp, and original filename
-    timestamp = str(int(time.time()))
     storage_file_path = f"{current_user_id}/{timestamp}_{file.filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
