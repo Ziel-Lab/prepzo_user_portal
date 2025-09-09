@@ -57,6 +57,9 @@ def upload_document():
     if not safe_filename:
         safe_filename = f"document_{timestamp}"
 
+    # Create storage-safe filename (replace spaces with underscores for Supabase storage)
+    storage_safe_filename = safe_filename.replace(' ', '_')
+
     file_bytes = file.read()
     
     # File size validation (10MB limit)
@@ -76,8 +79,8 @@ def upload_document():
 
     final_content_type_for_storage = 'application/pdf'
 
-    # Construct a unique path in storage using user ID, timestamp, and original filename
-    storage_file_path = f"{current_user_id}/{timestamp}_{file.filename}"
+    # Construct a unique path in storage using user ID, timestamp, and storage-safe filename
+    storage_file_path = f"{current_user_id}/{timestamp}_{storage_safe_filename}"
 
     document_comments = request.form.get("document_comments", "").strip()
     # Limit comment length
