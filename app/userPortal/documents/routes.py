@@ -57,8 +57,45 @@ def upload_document():
     if not safe_filename:
         safe_filename = f"document_{timestamp}"
 
-    # Create storage-safe filename (replace spaces with underscores for Supabase storage)
-    storage_safe_filename = safe_filename.replace(' ', '_')
+    # Create storage-safe filename using comprehensive sanitization
+    import unicodedata
+    import re
+    
+    def sanitize_filename(filename):
+        """
+        Sanitize filename following the same logic as the TypeScript version:
+        - Normalize special characters (ä → a, é → e, etc.)
+        - Replace remaining non-ASCII characters with underscores
+        - Replace illegal characters with underscores
+        - Replace spaces with underscores
+        - Remove consecutive underscores
+        - Trim leading/trailing underscores
+        - Ensure length is within limits (255 chars)
+        """
+        # Normalize special characters (NFD = NFD, removes combining diacritical marks)
+        normalized = unicodedata.normalize('NFD', filename)
+        # Remove combining diacritical marks (accents)
+        without_accents = re.sub(r'[\u0300-\u036f]', '', normalized)
+        # Replace remaining non-ASCII characters with underscores
+        ascii_only = re.sub(r'[^\x00-\x7F]', '_', without_accents)
+        # Replace illegal characters with underscores
+        legal_chars = re.sub(r'[!*\'();:@&=+$,/?%#\[\]]', '_', ascii_only)
+        # Replace spaces with underscores
+        no_spaces = re.sub(r'\s+', '_', legal_chars)
+        # Remove consecutive underscores
+        no_consecutive = re.sub(r'_+', '_', no_spaces)
+        # Trim leading/trailing underscores
+        trimmed = re.sub(r'^_+|_+$', '', no_consecutive)
+        # Ensure length is within limits (255 chars)
+        return trimmed[:255]
+    
+    storage_safe_filename = sanitize_filename(safe_filename)
+    
+    # Check if filename becomes too short or empty after cleaning
+    if len(storage_safe_filename) < 3 or not storage_safe_filename.replace('.', '').replace('_', '').replace('-', ''):
+        return jsonify({
+            "error": "Please rename the file to contain only letters (a-z, A-Z), numbers (0-9), underscores (_), hyphens (-), and dots (.). Special characters and spaces are not allowed."
+        }), 400
 
     file_bytes = file.read()
     
