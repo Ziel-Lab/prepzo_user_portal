@@ -104,31 +104,82 @@ def analyze_resume():
 def get_analyze_resume():
     current_user_id = str(g.user.id)
     try:
+        # Parse pagination parameters
+        page_size = 5  # Fixed page size as requested
+        cursor = request.args.get("cursor")
         job_id_param = request.args.get("job_id")
 
+        # Build base query
         if job_id_param:
-            query_response = (
+            query = (
                 extensions.supabase.table("analyze_resume")
                 .select("*")
                 .eq("user_id", current_user_id)
                 .eq("job_id", job_id_param)
-                .order("created_at", desc=True)
-                .execute()
             )
         else:
-            query_response = (
+            query = (
                 extensions.supabase.table("analyze_resume")
                 .select("*")
                 .eq("user_id", current_user_id)
-                .order("created_at", desc=True)
-                .execute()
             )
 
-        if query_response is None:
-            return jsonify(None), 200
+        # Apply cursor filter for pagination (if cursor provided)
+        if cursor:
+            try:
+                # For descending order (newest first), get records older than cursor
+                query = query.lt("created_at", cursor)
+            except Exception:
+                # Invalid cursor - ignore and start from beginning
+                pass
 
-        result_data = getattr(query_response, "data", query_response)
-        return jsonify(result_data or None), 200
+        # Order by created_at descending and limit to page_size + 1 to check for more pages
+        query = query.order("created_at", desc=True).limit(page_size + 1)
+
+        query_response = query.execute()
+
+        if query_response is None:
+            return jsonify({
+                "data": None,
+                "pagination": {
+                    "page_size": page_size,
+                    "current_count": 0,
+                    "has_more": False,
+                    "cursor_column": "created_at"
+                }
+            }), 200
+
+        result_data = getattr(query_response, "data", query_response) or []
+        
+        # Determine if there are more pages
+        has_more = len(result_data) > page_size
+        
+        # Get the actual data to return (trim the extra one if we got it)
+        actual_data = result_data[:page_size] if has_more else result_data
+        
+        # Get next cursor from the last record
+        next_cursor = None
+        if has_more and actual_data:
+            next_cursor = actual_data[-1]['created_at']
+        
+        # Build pagination metadata
+        pagination_metadata = {
+            "page_size": page_size,
+            "current_count": len(actual_data),
+            "has_more": has_more,
+            "cursor_column": "created_at"
+        }
+        
+        if next_cursor:
+            pagination_metadata["next_cursor"] = next_cursor
+        
+        if cursor:
+            pagination_metadata["current_cursor"] = cursor
+
+        return jsonify({
+            "data": actual_data,
+            "pagination": pagination_metadata
+        }), 200
         
     except Exception as e:
         logging.error(f"Error fetching from analyze_resume table: {str(e)}")
