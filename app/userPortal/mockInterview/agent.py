@@ -11,7 +11,7 @@ import time
 from typing import Dict, Any, Optional
 from datetime import datetime
 from livekit.plugins import noise_cancellation
-from livekit.agents import room_io
+from livekit.agents import RoomIO
 # Fix Windows encoding issues with Unicode characters in job descriptions
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -860,18 +860,12 @@ async def entrypoint(ctx: JobContext):
         'llm': realtime.RealtimeModel(
             voice="alloy",
             temperature=0.7
+        ),
+        'room_input_options': RoomIO.RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC()  # Background voice cancellation
         )
     }
-    
-    # Add noise cancellation
-    try:
-        from livekit.plugins import noise_cancellation
-        session_config['room_input_options'] = {
-            'noise_cancellation': noise_cancellation.BVC()  # Background voice cancellation
-        }
-        logger.info("Noise cancellation (BVC) enabled")
-    except Exception as nc_error:
-        logger.warning(f"Failed to load noise cancellation: {nc_error}")
+
     
     # Try to add VAD with fallback to basic configuration
     try:
@@ -950,21 +944,6 @@ async def entrypoint(ctx: JobContext):
         # Start the session with the agent
         logger.info("Starting simple agent session...")
         # Create session config with noise cancellation
-        session_config = {
-            'llm': realtime.RealtimeModel(
-                voice="alloy",
-                temperature=0.7
-            ),
-            'room_input_options': room_io.RoomInputOptions(
-                noise_cancellation=noise_cancellation.BVC()  # Background voice cancellation
-            )
-        }
-
-        # Create session
-        logger.info(f"Creating simple AgentSession with config: {list(session_config.keys())}")
-        session = AgentSession(**session_config)
-        logger.info("Simple AgentSession created successfully with noise cancellation")
-
         # Start session
         await session.start(room=ctx.room, agent=assistant)
         
