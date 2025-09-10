@@ -1105,11 +1105,9 @@ def get_user_mock_interview_limits():
         return jsonify({'error': 'Internal server error'}), 500
 
 
-
 @mock_interview_bp.route('/sessions', methods=['GET'])
 @require_authentication
 def get_user_sessions():
-    """Get user's interview sessions with cursor pagination - FIXED"""
     try:
         admin_client = get_admin_client()
         
@@ -1120,9 +1118,25 @@ def get_user_sessions():
             request.args
         )
         
-        # Add display status to each session
+        # Add display status and attempts info to each session
         for session in sessions:
             try:
+                # Get attempts count for this session
+                attempts_result = admin_client.table('mock_interview_attempts')\
+                    .select('id, status')\
+                    .eq('mock_interview_id', session['id'])\
+                    .execute()
+                
+                attempts = attempts_result.data or []
+                total_attempts = len(attempts)
+                processed_attempts = len([a for a in attempts if a.get('status') == 'PROCESSED'])
+                
+                # Add attempts info to session
+                session['attempts_count'] = total_attempts
+                session['is_attempts_exhausted'] = total_attempts >= 3
+                session['processed_attempts_count'] = processed_attempts
+                
+                # Get display status
                 display_info = get_display_status(
                     session.get('status', 'created'),
                     session.get('status_prep', 'PENDING')
@@ -1130,7 +1144,7 @@ def get_user_sessions():
                 
                 session['display_status'] = display_info['display_status']
                 session['display_text'] = display_info['display_text']
-                session['is_ready_to_join'] = display_info['is_ready_to_join']
+                session['is_ready_to_join'] = display_info['is_ready_to_join'] and not session['is_attempts_exhausted']
                 session['color_class'] = display_info['color_class']
                 
             except Exception:
@@ -1139,6 +1153,9 @@ def get_user_sessions():
                 session['display_text'] = 'Unknown Status'
                 session['is_ready_to_join'] = False
                 session['color_class'] = 'default'
+                session['attempts_count'] = 0
+                session['is_attempts_exhausted'] = False
+                session['processed_attempts_count'] = 0
         
         return jsonify({
             'sessions': sessions,

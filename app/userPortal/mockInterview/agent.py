@@ -819,7 +819,7 @@ async def mark_interview_successful(attempt_id: str, reason: str = "Interview co
 
 # LiveKit job entry point
 async def entrypoint(ctx: JobContext):
-    """Simplified entry point for LiveKit agent jobs"""
+    """Simplified entry point for LiveKit agent jobs with dispatch timeout"""
     logger.info(f"SIMPLE AGENT STARTUP: Starting for room: {ctx.room.name}")
     
     # Get agent prompt from database
@@ -827,7 +827,17 @@ async def entrypoint(ctx: JobContext):
     
     if not agent_prompt or not session_id or not attempt_id:
         logger.error("CRITICAL: Could not get agent_prompt from database. Agent will not start.")
+        # Emergency cleanup if we can't get basic data
+        try:
+            from .api import delete_room
+            await delete_room(ctx.room.name)
+            logger.info(f"Cleaned up room {ctx.room.name} after dispatch failure")
+        except:
+            pass
         return
+    
+    # Start dispatch timeout - if agent doesn't connect in 10 seconds, cleanup
+    dispatch_timeout_task = asyncio.create_task(_agent_dispatch_timeout(ctx.room.name, attempt_id, 10.0))
     
     logger.info(f"Got agent_prompt for session {session_id}. Prompt length: {len(agent_prompt)} characters")
     
@@ -838,6 +848,10 @@ async def entrypoint(ctx: JobContext):
         assistant._ctx = ctx
     except Exception as e:
         logger.error(f"Failed to create simple agent: {e}")
+        # Cleanup on agent creation failure
+        if not dispatch_timeout_task.done():
+            dispatch_timeout_task.cancel()
+        await _emergency_dispatch_cleanup(ctx.room.name, attempt_id, f"agent creation failed: {e}")
         return
     
     # Create AgentSession with OpenAI Realtime API
@@ -847,6 +861,16 @@ async def entrypoint(ctx: JobContext):
             temperature=0.7
         )
     }
+    
+    # Add noise cancellation
+    try:
+        from livekit.plugins import noise_cancellation
+        session_config['room_input_options'] = {
+            'noise_cancellation': noise_cancellation.BVC()  # Background voice cancellation
+        }
+        logger.info("Noise cancellation (BVC) enabled")
+    except Exception as nc_error:
+        logger.warning(f"Failed to load noise cancellation: {nc_error}")
     
     # Try to add VAD with fallback to basic configuration
     try:
@@ -917,16 +941,99 @@ async def entrypoint(ctx: JobContext):
             logger.error(f"Error in conversation_item_added handler: {e}")
 
     # Connect to the room and start the agent
-    logger.info("Connecting to LiveKit room...")
-    await ctx.connect()
-    logger.info(f"Connected to room: {ctx.room.name}")
+    try:
+        logger.info("Connecting to LiveKit room...")
+        await ctx.connect()
+        logger.info(f"Connected to room: {ctx.room.name}")
+        
+        # Start the session with the agent
+        logger.info("Starting simple agent session...")
+        await session.start(room=ctx.room, agent=assistant)
+        
+        # Cancel dispatch timeout - agent connected successfully
+        if not dispatch_timeout_task.done():
+            dispatch_timeout_task.cancel()
+            logger.info("Agent connected successfully - dispatch timeout cancelled")
+        
+        logger.info("Simple mock interview session started successfully!")
+        logger.info(f"Simple agent ready for session: {session_id}")
+        
+    except Exception as connection_error:
+        logger.error(f"Failed to connect agent to room: {connection_error}")
+        # Cleanup on connection failure
+        if not dispatch_timeout_task.done():
+            dispatch_timeout_task.cancel()
+        await _emergency_dispatch_cleanup(ctx.room.name, attempt_id, f"connection failed: {connection_error}")
+        return
+
+
+async def _agent_dispatch_timeout(room_name: str, attempt_id: str, timeout_seconds: float):
+    """Emergency timeout handler - NEVER leave status as 'active' if agent fails to connect"""
+    try:
+        await asyncio.sleep(timeout_seconds)
+        
+        # If we reach here, agent failed to connect in time
+        logger.critical(f"AGENT DISPATCH TIMEOUT ({timeout_seconds}s) for room {room_name}")
+        
+        # 1. IMMEDIATELY mark attempt as failed in database
+        try:
+            await mark_interview_failed(attempt_id, "agent dispatch timeout - never connected")
+            logger.info(f"Marked attempt {attempt_id} as FAILED due to dispatch timeout")
+        except Exception as db_error:
+            logger.error(f"Failed to mark attempt as failed: {db_error}")
+        
+        # 2. DESTROY the room
+        try:
+            from .api import delete_room
+            await delete_room(room_name)
+            logger.info(f"Destroyed room {room_name} after dispatch timeout")
+        except Exception as room_error:
+            logger.error(f"Failed to destroy room {room_name}: {room_error}")
+        
+        # 3. Cleanup the failed attempt (so it doesn't count against user)
+        try:
+            from .routes import cleanup_failed_attempt
+            cleanup_failed_attempt(attempt_id, "agent dispatch timeout")
+            logger.info(f"Cleaned up failed attempt {attempt_id}")
+        except Exception as cleanup_error:
+            logger.error(f"Failed to cleanup attempt {attempt_id}: {cleanup_error}")
+        
+        logger.critical(f"Dispatch timeout cleanup completed for {room_name}")
+        
+    except asyncio.CancelledError:
+        # Normal case - agent connected successfully
+        logger.info(f"Dispatch timeout cancelled for {room_name} - agent connected successfully")
+    except Exception as e:
+        logger.critical(f"Dispatch timeout handler failed: {e}")
+
+
+async def _emergency_dispatch_cleanup(room_name: str, attempt_id: str, reason: str):
+    """Emergency cleanup for any dispatch failure - NEVER leave status as 'active'"""
+    logger.critical(f"EMERGENCY DISPATCH CLEANUP: {room_name} - {reason}")
     
-    # Start the session with the agent
-    logger.info("Starting simple agent session...")
-    await session.start(room=ctx.room, agent=assistant)
+    # 1. Mark as failed in database
+    try:
+        await mark_interview_failed(attempt_id, f"dispatch failure: {reason}")
+        logger.info(f"Marked attempt {attempt_id} as FAILED")
+    except Exception as db_error:
+        logger.error(f"Failed to mark attempt as failed: {db_error}")
     
-    logger.info("Simple mock interview session started successfully!")
-    logger.info(f"Simple agent ready for session: {session_id}")
+    # 2. Destroy room
+    try:
+        from .api import delete_room
+        await delete_room(room_name)
+        logger.info(f"Destroyed room {room_name}")
+    except Exception as room_error:
+        logger.error(f"Failed to destroy room: {room_error}")
+    
+    # 3. Cleanup attempt
+    try:
+        from .routes import cleanup_failed_attempt
+        cleanup_failed_attempt(attempt_id, f"emergency dispatch cleanup: {reason}")
+        logger.info(f"Cleaned up attempt {attempt_id}")
+    except Exception as cleanup_error:
+        logger.error(f"Failed to cleanup attempt: {cleanup_error}")
+
 
 def main():
     """Main function to run the simplified mock interview agent"""
@@ -953,10 +1060,11 @@ def main():
             worker_options = agents.WorkerOptions(
                 entrypoint_fnc=entrypoint,
                 port=8081,  # Debug port
+                drain_timeout=30,  # Reduced from default 30 minutes to 30 seconds
                 # No agent_name = automatic dispatch enabled (1 agent per room)
                 # LiveKit handles concurrent rooms automatically
             )
-            logger.info("Starting Simple LiveKit agent worker...")
+            logger.info("Starting Simple LiveKit agent worker with 30s drain timeout...")
             agents.cli.run_app(worker_options)
             return True
         except Exception as e:
