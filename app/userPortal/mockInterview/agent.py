@@ -859,12 +859,11 @@ async def entrypoint(ctx: JobContext):
     from livekit.plugins import noise_cancellation
     import inspect as _inspect
 
-    # Prepare constructor args for AgentSession (do NOT include room_input_options here)
+    # Create AgentSession with OpenAI Realtime API
     session_config = {
         'llm': realtime.RealtimeModel(
             voice="echo",  # Voice ID for realtime model
-            temperature=0.7,  # Controls response creativity
-            streaming=True  # Enable streaming for real-time responses
+            temperature=0.7  # Controls response creativity
         )
     }
 
