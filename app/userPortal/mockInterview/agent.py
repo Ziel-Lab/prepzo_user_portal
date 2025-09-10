@@ -861,7 +861,11 @@ async def entrypoint(ctx: JobContext):
 
     # Prepare constructor args for AgentSession (do NOT include room_input_options here)
     session_config = {
-        'llm': realtime.RealtimeModel(voice="alloy", temperature=0.7)
+        'llm': realtime.RealtimeModel(
+            voice="echo",  # Voice ID for realtime model
+            temperature=0.7,  # Controls response creativity
+            streaming=True  # Enable streaming for real-time responses
+        )
     }
 
     # Try to load VAD (add to constructor args only if AgentSession supports it)
