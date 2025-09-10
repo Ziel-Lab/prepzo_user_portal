@@ -11,7 +11,7 @@ import time
 from typing import Dict, Any, Optional
 from datetime import datetime
 from livekit.plugins import noise_cancellation
-from livekit.agents import RoomIO
+from livekit.agents import RoomInputOptions
 # Fix Windows encoding issues with Unicode characters in job descriptions
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -861,7 +861,7 @@ async def entrypoint(ctx: JobContext):
             voice="alloy",
             temperature=0.7
         ),
-        'room_input_options': RoomIO.RoomInputOptions(
+        'room_input_options': RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC()  # Background voice cancellation
         )
     }
@@ -943,8 +943,7 @@ async def entrypoint(ctx: JobContext):
         
         # Start the session with the agent
         logger.info("Starting simple agent session...")
-        # Create session config with noise cancellation
-        # Start session
+        # Start session with the already configured noise cancellation
         await session.start(room=ctx.room, agent=assistant)
         
         # Cancel dispatch timeout - agent connected successfully
