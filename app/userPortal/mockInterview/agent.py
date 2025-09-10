@@ -10,8 +10,7 @@ import json
 import time
 from typing import Dict, Any, Optional
 from datetime import datetime
-from livekit.plugins import noise_cancellation
-from livekit.agents import RoomInputOptions
+
 # Fix Windows encoding issues with Unicode characters in job descriptions
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -856,18 +855,16 @@ async def entrypoint(ctx: JobContext):
         return
     
     # Create AgentSession with OpenAI Realtime API
+    from livekit.agents import RoomInputOptions
+    from livekit.plugins import noise_cancellation
+    import inspect as _inspect
+
+    # Prepare constructor args for AgentSession (do NOT include room_input_options here)
     session_config = {
-        'llm': realtime.RealtimeModel(
-            voice="alloy",
-            temperature=0.7
-        ),
-        'room_input_options': RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC()  # Background voice cancellation
-        )
+        'llm': realtime.RealtimeModel(voice="alloy", temperature=0.7)
     }
 
-    
-    # Try to add VAD with fallback to basic configuration
+    # Try to load VAD (add to constructor args only if AgentSession supports it)
     try:
         vad = silero.VAD.load(
             min_silence_duration=0.8,
@@ -878,12 +875,32 @@ async def entrypoint(ctx: JobContext):
         logger.info("VAD loaded successfully")
     except Exception as vad_error:
         logger.warning(f"Failed to load VAD: {vad_error}")
-    
-    # Create session
-    logger.info(f"Creating simple AgentSession with config: {list(session_config.keys())}")
-    session = AgentSession(**session_config)
-    logger.info("Simple AgentSession created successfully")
-    
+
+    # Construct AgentSession defensively (only pass constructor-accepted args)
+    try:
+        ctor_params = _inspect.signature(AgentSession.__init__).parameters.keys()
+        ctor_kwargs = {k: v for k, v in session_config.items() if k in ctor_params}
+        logger.info(f"Creating AgentSession with args: {list(ctor_kwargs.keys())}")
+        session = AgentSession(**ctor_kwargs)
+        logger.info("AgentSession constructed successfully")
+    except Exception as cexc:
+        logger.error(f"Failed to construct AgentSession: {cexc}")
+        if not dispatch_timeout_task.done():
+            dispatch_timeout_task.cancel()
+        await _emergency_dispatch_cleanup(ctx.room.name, attempt_id, f"session construction failed: {cexc}")
+        return
+
+    # Create RoomInputOptions (noise cancellation)
+    room_input_options_obj = None
+    try:
+        room_input_options_obj = RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC()
+        )
+        logger.info("Configured RoomInputOptions with BVC noise cancellation")
+    except Exception as nc_err:
+        logger.warning(f"Could not configure BVC noise cancellation: {nc_err}")
+        room_input_options_obj = None
+
     # Add event handlers for transcription ONLY
     @session.on("conversation_item_added")
     def on_conversation_item_added(event):
@@ -935,25 +952,73 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"Error in conversation_item_added handler: {e}")
 
-    # Connect to the room and start the agent
+    # Connect to room and start session — try multiple kw names for compatibility
     try:
         logger.info("Connecting to LiveKit room...")
         await ctx.connect()
         logger.info(f"Connected to room: {ctx.room.name}")
-        
-        # Start the session with the agent
-        logger.info("Starting simple agent session...")
-        # Start session with the already configured noise cancellation
-        await session.start(room=ctx.room, agent=assistant)
-        
+
+        logger.info("Starting session (attempting to pass room input options if supported)...")
+        try:
+            start_sig = _inspect.signature(session.start)
+            start_params = set(start_sig.parameters.keys())
+        except Exception:
+            start_params = set()
+
+        started = False
+        start_exc = None
+
+        if room_input_options_obj:
+            # try common kw names
+            for kw in ('room_input_options', 'input_options', 'room_input'):
+                if kw in start_params:
+                    try:
+                        await session.start(room=ctx.room, agent=assistant, **{kw: room_input_options_obj})
+                        started = True
+                        logger.info(f"Session started with input options via kw '{kw}'")
+                        break
+                    except Exception as e:
+                        logger.warning(f"session.start with kw '{kw}' failed: {e}")
+                        start_exc = e
+
+        # fallback: attach to session and start without kwargs
+        if not started:
+            if room_input_options_obj:
+                try:
+                    setattr(session, 'room_input_options', room_input_options_obj)
+                    logger.info("Attached room_input_options to session object as fallback")
+                except Exception as e:
+                    logger.warning(f"Fallback attach of room_input_options failed: {e}")
+
+            try:
+                await session.start(room=ctx.room, agent=assistant)
+                started = True
+                logger.info("Session started without passing input options as kwargs (fallback)")
+            except Exception as final_e:
+                logger.error(f"Failed to start session (final attempt): {final_e}")
+                start_exc = final_e
+
+        if not started:
+            logger.critical(f"Unable to start AgentSession; last error: {start_exc}")
+            if not dispatch_timeout_task.done():
+                dispatch_timeout_task.cancel()
+            await _emergency_dispatch_cleanup(ctx.room.name, attempt_id, f"session start failed: {start_exc}")
+            return
+
         # Cancel dispatch timeout - agent connected successfully
         if not dispatch_timeout_task.done():
             dispatch_timeout_task.cancel()
             logger.info("Agent connected successfully - dispatch timeout cancelled")
-        
+
         logger.info("Simple mock interview session started successfully!")
         logger.info(f"Simple agent ready for session: {session_id}")
-        
+
+    except Exception as connection_error:
+        logger.error(f"Failed to connect/start session: {connection_error}")
+        if not dispatch_timeout_task.done():
+            dispatch_timeout_task.cancel()
+        await _emergency_dispatch_cleanup(ctx.room.name, attempt_id, f"connection failed: {connection_error}")
+        return
     except Exception as connection_error:
         logger.error(f"Failed to connect agent to room: {connection_error}")
         # Cleanup on connection failure
