@@ -36,7 +36,7 @@ def load_secrets_from_aws():
         secrets = get_secret(secret_name, region_name)
         
         if secrets:
-            # Set environment variables from AWS secrets
+            # Set environment variables from AWS secret manager
             for key, value in secrets.items():
                 if value:  # Only set non-empty values
                     os.environ[key] = str(value)
