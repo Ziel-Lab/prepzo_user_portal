@@ -1350,6 +1350,160 @@ def get_user_mock_interview_limits():
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@mock_interview_bp.route('/sessions', methods=['GET'])
+@require_authentication
+def get_user_sessions():
+    try:
+        admin_client = get_admin_client()
+        
+        # Get paginated sessions using fixed pagination
+        sessions, pagination_metadata = MockInterviewPagination.paginate_user_sessions(
+            admin_client, 
+            g.user.id, 
+            request.args
+        )
+        
+        # Add display status and attempts info to each session
+        for session in sessions:
+            try:
+                # Get attempts count for this session
+                attempts_result = admin_client.table('mock_interview_attempts')\
+                    .select('id, status')\
+                    .eq('mock_interview_id', session['id'])\
+                    .execute()
+                
+                attempts = attempts_result.data or []
+                total_attempts = len(attempts)
+                processed_attempts = len([a for a in attempts if a.get('status') == 'PROCESSED'])
+                
+                # Add attempts info to session
+                session['attempts_count'] = total_attempts
+                session['is_attempts_exhausted'] = total_attempts >= 3
+                session['processed_attempts_count'] = processed_attempts
+                
+                # Get display status
+                display_info = get_display_status(
+                    session.get('status', 'created'),
+                    session.get('status_prep', 'PENDING')
+                )
+                
+                session['display_status'] = display_info['display_status']
+                session['display_text'] = display_info['display_text']
+                session['is_ready_to_join'] = display_info['is_ready_to_join'] and not session['is_attempts_exhausted']
+                session['color_class'] = display_info['color_class']
+                
+            except Exception:
+                # Fallback to basic status
+                session['display_status'] = 'unknown'
+                session['display_text'] = 'Unknown Status'
+                session['is_ready_to_join'] = False
+                session['color_class'] = 'default'
+                session['attempts_count'] = 0
+                session['is_attempts_exhausted'] = False
+                session['processed_attempts_count'] = 0
+        
+        return jsonify({
+            'sessions': sessions,
+            'pagination': pagination_metadata
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Sessions API error: {str(e)}")
+        return jsonify({'error': 'Unable to load sessions'}), 500
+
+@mock_interview_bp.route('/sessions/mobile', methods=['GET'])
+@require_authentication
+def get_user_sessions_mobile():
+    """Mobile optimized endpoint with cursor pagination - FIXED"""
+    try:
+        admin_client = get_admin_client()
+        
+        # Get paginated sessions using fixed pagination
+        sessions, pagination_metadata = MockInterviewPagination.paginate_user_sessions(
+            admin_client, 
+            g.user.id, 
+            request.args
+        )
+        
+        # Create mobile-optimized session data
+        mobile_sessions = []
+        for session in sessions:
+            try:
+                display_info = get_display_status(
+                    session.get('status', 'created'),
+                    session.get('status_prep', 'PENDING')
+                )
+                
+                mobile_session = {
+                    'id': session['id'],
+                    'title': session.get('title', 'Interview Session'),
+                    'position': session.get('position', 'Position'),
+                    'company_name': session.get('company_name', ''),
+                    'interview_type': session.get('interview_type', 'behavioral'),
+                    'created_at': session['created_at'],
+                    'display_status': display_info['display_status'],
+                    'display_text': display_info['display_text'],
+                    'is_ready_to_join': display_info['is_ready_to_join'],
+                    'color_class': display_info['color_class']
+                }
+                mobile_sessions.append(mobile_session)
+                
+            except Exception:
+                # Basic fallback for mobile
+                mobile_sessions.append({
+                    'id': session['id'],
+                    'title': session.get('title', 'Interview Session'),
+                    'position': session.get('position', 'Position'),
+                    'created_at': session['created_at'],
+                    'display_status': 'unknown',
+                    'is_ready_to_join': False
+                })
+        
+        return jsonify({
+            'sessions': mobile_sessions,
+            'pagination': pagination_metadata
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Mobile sessions API error: {str(e)}")
+        return jsonify({'error': 'Unable to load sessions'}), 500
+
+@mock_interview_bp.route('/sessions/verify', methods=['GET'])
+@require_authentication
+def verify_pagination():
+    """Quick verification that pagination is working - REMOVE AFTER TESTING"""
+    try:
+        admin_client = get_admin_client()
+        
+        # Count total sessions
+        count_result = admin_client.table('mock_interview')\
+            .select('id', count='exact')\
+            .eq('user_id', g.user.id)\
+            .execute()
+        
+        total_count = getattr(count_result, 'count', 0)
+        
+        # Get first page with limit 5 for testing
+        sessions, pagination = MockInterviewPagination.paginate_user_sessions(
+            admin_client, g.user.id, {'limit': '5'}
+        )
+        
+        return jsonify({
+            'verification': {
+                'total_sessions_in_db': total_count,
+                'first_5_sessions_count': len(sessions),
+                'has_more': pagination.get('has_more', False),
+                'next_cursor_exists': 'next_cursor' in pagination,
+                'pagination_working': total_count > 5 and pagination.get('has_more', False),
+                'status': 'WORKING' if (total_count > 5 and pagination.get('has_more', False)) else 'CHECK_NEEDED'
+            },
+            'pagination_metadata': pagination
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'verification_error': str(e)}), 500
+
+
 @mock_interview_bp.route('/webhook/interview-completed', methods=['POST'])
 def interview_completed_webhook():
     """Webhook endpoint to receive interview completion data"""
@@ -1412,7 +1566,7 @@ def interview_completed_webhook():
         logger.error(f"Error processing interview completion webhook: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
-@mock_interview_bp.route('/session/<session_id>/attempts-summary', methods=['GET'])
+@mock_interview_bp.route('/session/<session_id>/attempts', methods=['GET'])
 @require_authentication
 def get_session_attempts_summary(session_id):
     """
@@ -1432,17 +1586,57 @@ def get_session_attempts_summary(session_id):
         if not session_check.data:
             return jsonify({'error': 'Session not found'}), 404
         
-        # Get attempts with minimal data
-        attempts = admin_client.table('mock_interview_attempts')\
-            .select('id, attempt_number, status, evaluation_score, actual_duration_minutes, created_at')\
-            .eq('mock_interview_id', session_id)\
-            .order('attempt_number')\
-            .execute()
+        session_info = session_result.data[0]
+
         
-        return jsonify({
-            'attempts': attempts.data or [],
-            'session_id': session_id
-        }), 200
+        # Get all attempts for this session with retry logic
+        attempts_result = execute_with_retry(
+            lambda: admin_client.table('mock_interview_attempts')\
+                .select('id, attempt_number, room_name, status, actual_duration_minutes, feedback, completed_at, created_at')\
+                .eq('mock_interview_id', session_id)\
+                .order('attempt_number', desc=False),
+            f"attempts query for session {session_id}"
+        )
+        
+        raw_attempts = attempts_result.data if attempts_result.data else []
+
+        
+        # Process and enhance attempts for frontend compatibility
+        processed_attempts = []
+        for attempt in raw_attempts:
+            # Status is already uppercase (COMPLETED, ACTIVE, PENDING, etc.)
+            status = attempt.get('status', 'PENDING')
+            
+            # Enhanced attempt object for frontend
+            processed_attempt = {
+                **attempt,
+                'status': status,
+                'has_feedback': bool(attempt.get('feedback')),
+                'is_completed': status in ['COMPLETED'],
+                'is_processed': status in ['PROCESSED'] and bool(attempt.get('feedback')),
+                'can_view_feedback': status in ['PROCESSED'] and bool(attempt.get('feedback')),
+                'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
+                'completed_at_display': attempt.get('completed_at') if attempt.get('completed_at') else 'N/A',
+                'created_at_display': attempt.get('created_at') if attempt.get('created_at') else 'N/A',
+                'actual_duration_minutes_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A'
+
+            }
+            
+            processed_attempts.append(processed_attempt)
+
+        
+        # Format response with complete information
+        response_data = {
+            'session_id': session_id,
+            'session_info': session_info,
+            'attempts': processed_attempts,
+            'total_attempts': len(processed_attempts),
+            'max_attempts': 3,
+            'remaining_attempts': max(0, 3 - len(processed_attempts))
+        }
+        
+
+        return jsonify(response_data), 200
         
     except Exception as e:
         logger.error(f"Error getting session attempts summary: {str(e)}")
@@ -1457,7 +1651,7 @@ def get_attempt_data(attempt_id):
         
         # Get attempt data with session info
         attempt_result = admin_client.table('mock_interview_attempts')\
-            .select('*, mock_interview!inner(user_id, title, interview_type, position, company_name)')\
+            .select('*, mock_interview!inner(user_id, title, interview_type, position, company_name, created_at)')\
             .eq('id', attempt_id)\
             .execute()
         
@@ -1480,7 +1674,10 @@ def get_attempt_data(attempt_id):
             'is_processed': attempt.get('status') in ['PROCESSED'] and bool(attempt.get('feedback')),
             'can_view_feedback': attempt.get('status') in ['PROCESSED'] and bool(attempt.get('feedback')),
             'duration_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A',
-            'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending'
+            'score_display': f"{attempt.get('evaluation_score', 0)}/100" if attempt.get('evaluation_score') is not None else 'Pending',
+            'completed_at_display': attempt.get('completed_at') if attempt.get('completed_at') else 'N/A',
+            'created_at_display': attempt.get('created_at') if attempt.get('created_at') else 'N/A',
+            'actual_duration_minutes_display': f"{attempt.get('actual_duration_minutes', 0)} min" if attempt.get('actual_duration_minutes') else 'N/A'
         }
         
         return jsonify({
@@ -1891,6 +2088,167 @@ def get_user_sessions_count():
         logger.error(f"Error getting session count: {str(e)}")
         return jsonify({'error': 'Internal server error'}), 500
 
+@mock_interview_bp.route('/sessions/stats', methods=['GET'])
+@require_authentication
+def get_user_sessions_stats():
+    """Get comprehensive stats for user's mock interview sessions"""
+    try:
+        admin_client = get_admin_client()
+        user_id = g.user.id
+        
+        # Get total sessions count
+        sessions_count_result = admin_client.table('mock_interview')\
+            .select('id', count='exact')\
+            .eq('user_id', user_id)\
+            .execute()
+        
+        total_sessions = getattr(sessions_count_result, 'count', 0)
+        
+        # Get all attempts for this user with feedback and duration data
+        attempts_result = admin_client.table('mock_interview_attempts')\
+            .select('id, status, feedback, evaluation_score, actual_duration_minutes, mock_interview_id')\
+            .execute()
+        
+        # Filter attempts for this user's sessions
+        user_sessions_result = admin_client.table('mock_interview')\
+            .select('id')\
+            .eq('user_id', user_id)\
+            .execute()
+        
+        user_session_ids = [s['id'] for s in user_sessions_result.data] if user_sessions_result.data else []
+        
+        attempts = [a for a in (attempts_result.data or []) if a.get('mock_interview_id') in user_session_ids]
+        
+        # Filter PROCESSED attempts (these have feedback JSON with scores)
+        processed_attempts = [a for a in attempts if a.get('status') == 'PROCESSED']
+        
+        # Debug logging
+        logger.info(f"Stats query found {len(attempts)} total attempts for user, {len(processed_attempts)} PROCESSED attempts")
+        statuses = [a.get('status') for a in attempts]
+        logger.info(f"Attempt statuses found: {set(statuses)}")
+        if processed_attempts:
+            logger.info(f"PROCESSED attempt IDs: {[a.get('id') for a in processed_attempts]}")
+        else:
+            logger.warning("No PROCESSED attempts found - checking for other status variations")
+            # Check for lowercase processed or other variations
+            other_processed = [a for a in attempts if str(a.get('status', '')).lower() in ['processed']]
+            if other_processed:
+                logger.warning(f"Found {len(other_processed)} attempts with status variations: {[a.get('status') for a in other_processed]}")
+                processed_attempts = other_processed  # Use these instead
+        
+        # Count sessions where all 3 attempts are processed
+        attempts_by_session = {}
+        for attempt in attempts:
+            session_id = attempt.get('mock_interview_id')
+            if session_id not in attempts_by_session:
+                attempts_by_session[session_id] = []
+            attempts_by_session[session_id].append(attempt)
+        
+        # Only count sessions with all 3 attempts processed
+        completed_sessions = []
+        for session_id, session_attempts in attempts_by_session.items():
+            if (len(session_attempts) == 3 and 
+                all(a.get('status') == 'PROCESSED' for a in session_attempts)):
+                completed_sessions.append(session_id)
+        
+        completed_sessions_count = len(completed_sessions)
+        
+        # Log session completion details
+        logger.info(f"Found {len(attempts_by_session)} total sessions")
+        for session_id, session_attempts in attempts_by_session.items():
+            logger.info(f"Session {session_id}: {len(session_attempts)} attempts, "
+                      f"statuses: {[a.get('status') for a in session_attempts]}")
+        logger.info(f"Completed sessions (all 3 attempts PROCESSED): {completed_sessions_count}")
+        
+        # Calculate average score from feedback JSON
+        scores = []
+        total_duration_minutes = 0
+        
+        for attempt in processed_attempts:
+            attempt_id = attempt.get('id', 'unknown')
+            logger.info(f"Processing attempt {attempt_id} - status: {attempt.get('status')}, has_feedback: {bool(attempt.get('feedback'))}, has_eval_score: {bool(attempt.get('evaluation_score'))}")
+            
+            # Extract score from feedback JSON using enhanced function
+            if attempt.get('feedback'):
+                try:
+                    extracted_score = extract_score_from_feedback(attempt['feedback'])
+                    if extracted_score is not None:
+                        scores.append(extracted_score)
+                        logger.info(f"Extracted score {extracted_score} from feedback for attempt {attempt_id}")
+                    else:
+                        logger.warning(f"Could not extract score from feedback for attempt {attempt_id}")
+                        # Log the feedback structure for debugging
+                        if isinstance(attempt['feedback'], str):
+                            try:
+                                feedback_data = json.loads(attempt['feedback'])
+                                logger.warning(f"Feedback keys for attempt {attempt_id}: {list(feedback_data.keys())}")
+                            except:
+                                logger.warning(f"Invalid JSON in feedback for attempt {attempt_id}")
+                        else:
+                            logger.warning(f"Feedback keys for attempt {attempt_id}: {list(attempt['feedback'].keys()) if isinstance(attempt['feedback'], dict) else 'not a dict'}")
+                except Exception as e:
+                    logger.warning(f"Error parsing feedback for attempt {attempt_id}: {e}")
+            
+            # Fallback to evaluation_score if no feedback score
+            elif attempt.get('evaluation_score'):
+                eval_score = attempt['evaluation_score']
+                if eval_score <= 10:
+                    scores.append(eval_score)
+                    logger.info(f"Used evaluation_score {eval_score} for attempt {attempt_id}")
+                else:
+                    # Convert percentage to rating out of 10
+                    converted_score = (eval_score / 100) * 10
+                    scores.append(converted_score)
+                    logger.info(f"Converted evaluation_score {eval_score}% to {converted_score}/10 for attempt {attempt_id}")
+            else:
+                logger.warning(f"No score available for attempt {attempt_id}")
+            
+            # Add duration
+            if attempt.get('actual_duration_minutes'):
+                total_duration_minutes += attempt['actual_duration_minutes']
+        
+        # Calculate average score
+        avg_score = 0
+        if scores:
+            avg_score = sum(scores) / len(scores)
+            avg_score = round(avg_score, 1)  # Round to 1 decimal place
+        
+        # Convert total time to hours and minutes
+        total_hours = total_duration_minutes // 60
+        remaining_minutes = total_duration_minutes % 60
+        
+        # Prepare response
+        stats = {
+            'total_sessions': total_sessions,
+            'completed_sessions': completed_sessions_count,
+            'avg_score': avg_score,
+            'avg_score_display': f"{avg_score}/10" if scores else "0/10",
+            'total_time_minutes': total_duration_minutes,
+            'total_time_hours': total_hours,
+            'total_time_display': f"{total_hours}h {remaining_minutes}m",
+            'total_attempts': len(attempts),
+            'completed_attempts': len(processed_attempts),
+            'scores_count': len(scores)
+        }
+        
+        logger.info(f"Stats for user {user_id[:8]}***: {stats}")
+        
+        return jsonify({
+            'stats': stats,
+            'debug': {
+                'total_attempts_found': len(attempts),
+                'processed_attempts_found': len(processed_attempts),
+                'scores_extracted': len(scores),
+                'sample_scores': scores[:5] if scores else []
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting user session stats: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 
 @mock_interview_bp.route('/cleanup-stuck-sessions', methods=['POST'])
 @require_authentication
@@ -2032,5 +2390,3 @@ def cleanup_failed_attempts():
     except Exception as e:
         logger.error(f"Error in failed attempts cleanup endpoint: {e}")
         return jsonify({'error': 'Failed to cleanup failed attempts'}), 500
-
-
