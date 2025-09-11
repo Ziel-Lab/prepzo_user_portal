@@ -1599,22 +1599,27 @@ def get_realtime_token():
         return jsonify({'error': 'Internal server error'}), 500
 
 def extract_score_from_feedback(feedback_json):
-    """Extract numeric score from feedback JSON - enhanced version"""
+    """Extract numeric score from feedback JSON using new structure"""
     try:
         if isinstance(feedback_json, str):
             feedback_data = json.loads(feedback_json)
         else:
             feedback_data = feedback_json
+
+        # Check if feedback follows new structure
+        if 'score' in feedback_data:
+            score_value = feedback_data['score']
+            if isinstance(score_value, (int, float)):
+                return float(score_value)
             
-        # Try multiple possible score field names and formats
-        score_fields = ['Score', 'score', 'overall_score', 'rating', 'evaluation_score']
-        
+        # Legacy format handling for backward compatibility
+        score_fields = ['Score', 'overall_score', 'rating', 'evaluation_score']
         for field in score_fields:
             if field in feedback_data:
                 score_value = feedback_data[field]
-                
-                # Handle string format like "7/10", "8.5/10"
-                if isinstance(score_value, str):
+                if isinstance(score_value, (int, float)):
+                    return float(score_value)
+                elif isinstance(score_value, str):
                     if '/' in score_value:
                         score_parts = score_value.split('/')
                         if score_parts and score_parts[0].strip():
@@ -1623,24 +1628,11 @@ def extract_score_from_feedback(feedback_json):
                             except ValueError:
                                 continue
                     else:
-                        # Try direct conversion for strings like "7", "8.5"
                         try:
                             return float(score_value.strip())
                         except ValueError:
                             continue
-                
-                # Handle numeric values directly
-                elif isinstance(score_value, (int, float)):
-                    return float(score_value)
-        
-        # If no direct score field, look for nested scoring
-        for key, value in feedback_data.items():
-            if isinstance(value, dict) and 'score' in value:
-                try:
-                    return float(value['score'])
-                except (ValueError, TypeError):
-                    continue
-                    
+                            
         return None
     except Exception as e:
         logger.warning(f"Error extracting score from feedback: {str(e)}")
@@ -1649,13 +1641,54 @@ def extract_score_from_feedback(feedback_json):
 @mock_interview_bp.route('/attempt/<attempt_id>/process-feedback', methods=['POST'])
 @require_authentication
 def process_feedback(attempt_id):
-    """Process and store feedback with extracted score"""
+    """Process and store feedback with extracted score using new structure"""
     try:
         data = request.get_json()
         feedback = data.get('feedback', {})
         
         if not feedback:
             return jsonify({'error': 'Feedback data is required'}), 400
+            
+        # Validate feedback structure
+        required_fields = [
+            'strengths_of_the_interview',
+            'weaknesses_of_the_interview',
+            'opportunities_of_the_interview',
+            'threats_of_the_interview',
+            'score',
+            'how_can_questions_be_answered_better',
+            'additional_questions_and_answers'
+        ]
+        
+        missing_fields = [field for field in required_fields if field not in feedback]
+        if missing_fields:
+            return jsonify({
+                'error': 'Invalid feedback structure',
+                'missing_fields': missing_fields,
+                'required_structure': {
+                    'strengths_of_the_interview': 'string',
+                    'weaknesses_of_the_interview': 'string',
+                    'opportunities_of_the_interview': 'string',
+                    'threats_of_the_interview': 'string',
+                    'score': 'number (1-10)',
+                    'how_can_questions_be_answered_better': 'string',
+                    'additional_questions_and_answers': 'array of {question, response}'
+                }
+            }), 400
+            
+        # Validate additional_questions_and_answers structure
+        additional_qa = feedback.get('additional_questions_and_answers', [])
+        if not isinstance(additional_qa, list):
+            return jsonify({
+                'error': 'additional_questions_and_answers must be an array'
+            }), 400
+            
+        for qa in additional_qa:
+            if not isinstance(qa, dict) or 'question' not in qa or 'response' not in qa:
+                return jsonify({
+                    'error': 'Each Q&A must have question and response fields',
+                    'example': {'question': 'string', 'response': 'string'}
+                }), 400
         
         admin_client = get_admin_client()
         
@@ -1673,10 +1706,10 @@ def process_feedback(attempt_id):
         if attempt['mock_interview']['user_id'] != g.user.id:
             return jsonify({'error': 'Access denied'}), 403
         
-        # Extract score from feedback
+        # Extract score from feedback using new structure
         evaluation_score = extract_score_from_feedback(feedback)
         
-        # Update attempt with feedback and extracted score - keep as completed
+        # Update attempt with feedback and extracted score
         update_data = {
             'feedback': json.dumps(feedback),
             'updated_at': 'now()'
@@ -1702,7 +1735,8 @@ def process_feedback(attempt_id):
                 'message': 'Feedback added successfully',
                 'attempt': processed_attempt,
                 'evaluation_score': evaluation_score,
-                'status': processed_attempt.get('status', 'COMPLETED')
+                'status': processed_attempt.get('status', 'COMPLETED'),
+                'feedback_structure': 'valid'
             }), 200
         else:
             return jsonify({'error': 'Failed to add feedback'}), 500
@@ -1781,6 +1815,48 @@ def complete_attempt(attempt_id):
         
         # Handle feedback if provided in completion 
         if feedback and final_status != 'error':  # Don't process feedback for error sessions
+            # Validate feedback structure
+            required_fields = [
+                'strengths_of_the_interview',
+                'weaknesses_of_the_interview',
+                'opportunities_of_the_interview',
+                'threats_of_the_interview',
+                'score',
+                'how_can_questions_be_answered_better',
+                'additional_questions_and_answers'
+            ]
+            
+            missing_fields = [field for field in required_fields if field not in feedback]
+            if missing_fields:
+                logger.warning(f"Invalid feedback structure in completion - missing fields: {missing_fields}")
+                return jsonify({
+                    'error': 'Invalid feedback structure',
+                    'missing_fields': missing_fields,
+                    'required_structure': {
+                        'strengths_of_the_interview': 'string',
+                        'weaknesses_of_the_interview': 'string',
+                        'opportunities_of_the_interview': 'string',
+                        'threats_of_the_interview': 'string',
+                        'score': 'number (1-10)',
+                        'how_can_questions_be_answered_better': 'string',
+                        'additional_questions_and_answers': 'array of {question, response}'
+                    }
+                }), 400
+                
+            # Validate additional_questions_and_answers structure
+            additional_qa = feedback.get('additional_questions_and_answers', [])
+            if not isinstance(additional_qa, list):
+                return jsonify({
+                    'error': 'additional_questions_and_answers must be an array'
+                }), 400
+                
+            for qa in additional_qa:
+                if not isinstance(qa, dict) or 'question' not in qa or 'response' not in qa:
+                    return jsonify({
+                        'error': 'Each Q&A must have question and response fields',
+                        'example': {'question': 'string', 'response': 'string'}
+                    }), 400
+            
             evaluation_score = extract_score_from_feedback(feedback)
             update_data['feedback'] = json.dumps(feedback)
             # Keep status as 'COMPLETED' - no PROCESSED status
