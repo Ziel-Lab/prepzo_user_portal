@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Safe LiveKit Agent Startup Script
 Handles model loading failures gracefully and provides fallback configurations
