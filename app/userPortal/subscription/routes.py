@@ -915,6 +915,21 @@ def create_checkout_session():
         
         customer_id = existing_sub_res.data.get('stripe_customer_id') if (existing_sub_res and existing_sub_res.data) else None
 
+        # ---------------------- FREE TRIAL HANDLING ----------------------
+        # If the user has never subscribed before (no Stripe customer_id) we
+        # start a 3-day trial on the new subscription we are about to create.
+        # We do this by passing `subscription_data.trial_period_days = 3` to
+        # the Checkout Session.  We also use `payment_behavior =
+        # 'default_incomplete'` to be sure the subscription moves to
+        # `trialing` immediately and invoices only after the trial.
+        # -----------------------------------------------------------------
+        subscription_data = {}
+        if not customer_id:
+            subscription_data = {
+                'trial_period_days': 3,
+                'payment_behavior': 'default_incomplete'
+            }
+
         # Step 2: Create or update a 'processing' subscription record.
         # This is the core of the new robust flow. We use upsert to make this idempotent.
         # This record now holds all necessary info *before* we call Stripe.
@@ -952,6 +967,7 @@ def create_checkout_session():
                 },
             ],
             mode='subscription',
+            subscription_data=subscription_data,
             success_url=current_app.config['STRIPE_SUCCESS_URL'] + '?session_id={CHECKOUT_SESSION_ID}',
             cancel_url=current_app.config['STRIPE_CANCEL_URL'],
             metadata={
