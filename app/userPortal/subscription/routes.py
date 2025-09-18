@@ -911,7 +911,14 @@ def create_checkout_session():
     try:
         # Step 1: Check for an existing ACTIVE subscription to get the customer_id if it exists.
         # This allows Stripe to apply credits or handle upgrades/downgrades correctly.
-        existing_sub_res = supabase.table('user_subscriptions').select('stripe_customer_id').eq('user_id', user_id).in_('status', ['active', 'trialing', 'canceling', 'past_due','canceled']).maybe_single().execute()
+        # Look for any prior subscription that indicates the user has already
+        # had a paid relationship (active, trial, canceled etc.).  We will
+        # withhold a new free-trial if we find one.
+        existing_sub_res = supabase.table('user_subscriptions')\
+            .select('stripe_customer_id')\
+            .eq('user_id', user_id)\
+            .in_('status', ['active', 'trialing', 'canceling', 'canceled', 'past_due'])\
+            .maybe_single().execute()
         
         customer_id = existing_sub_res.data.get('stripe_customer_id') if (existing_sub_res and existing_sub_res.data) else None
 
@@ -955,25 +962,34 @@ def create_checkout_session():
         if not upsert_res:
              raise Exception("Upsert operation to create 'processing' subscription failed.")
 
+        # -------------------------------------------------------------
+        # Build success & cancel URLs
+        # -------------------------------------------------------------
+        success_url_cfg = current_app.config.get('STRIPE_SUCCESS_URL')
+        cancel_url_cfg  = current_app.config.get('STRIPE_CANCEL_URL')
+
+        # In non-production we prefer the request's Origin so the redirect
+        # works automatically with localhost, ngrok, Vercel previews, etc.
+        flask_env = current_app.config.get('FLASK_ENV', 'production')
+        origin = request.headers.get('Origin')
+        if flask_env != 'production' and origin:
+            success_url = f"{origin}/success?session_id={{CHECKOUT_SESSION_ID}}"
+            cancel_url  = f"{origin}/cancel"
+        else:
+            success_url = success_url_cfg + '?session_id={CHECKOUT_SESSION_ID}'
+            cancel_url  = cancel_url_cfg
+
         # Step 3: Create the Stripe Checkout Session
         checkout_session = stripe.checkout.Session.create(
-            customer=customer_id, # Pass existing customer ID if available
-            client_reference_id=user_id, # Reliably links the session back to our user
+            customer=customer_id,  # Pass existing customer ID if available
+            client_reference_id=user_id,
             payment_method_types=['card'],
-            line_items=[
-                {
-                    'price': price_id,
-                    'quantity': 1,
-                },
-            ],
+            line_items=[{'price': price_id, 'quantity': 1}],
             mode='subscription',
             subscription_data=subscription_data,
-            success_url=current_app.config['STRIPE_SUCCESS_URL'] + '?session_id={CHECKOUT_SESSION_ID}',
-            cancel_url=current_app.config['STRIPE_CANCEL_URL'],
-            metadata={
-                'user_id': user_id,
-                'plan_id': plan_id
-            }
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={'user_id': user_id, 'plan_id': plan_id}
         )
         return jsonify(id=checkout_session.id)
     except Exception as e:
