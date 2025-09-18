@@ -861,6 +861,12 @@ def stripe_webhook():
 
     return jsonify(success=True)
 
+@subscription_bp.route("/test", methods=["GET"])
+def test_endpoint():
+    """Simple test endpoint to verify the subscription blueprint is working"""
+    current_app.logger.info("=== TEST ENDPOINT HIT ===")
+    return jsonify({"message": "Subscription blueprint is working", "timestamp": datetime.utcnow().isoformat()}), 200
+
 @subscription_bp.route("/config", methods=["GET"])
 @require_authentication
 def get_config():
@@ -884,9 +890,18 @@ def create_checkout_session():
     It creates or updates a 'processing' subscription record BEFORE redirecting
     the user to Stripe, making our database the source of truth from the start.
     """
+    current_app.logger.info("=== CREATE CHECKOUT SESSION ENDPOINT HIT ===")
+    current_app.logger.info(f"Request method: {request.method}")
+    current_app.logger.info(f"Request headers: {dict(request.headers)}")
+    current_app.logger.info(f"Request data: {request.get_data()}")
+    
     data = request.get_json()
+    current_app.logger.info(f"Parsed JSON data: {data}")
+    
     plan_id = data.get('planId')
     user_id = g.user.id
+    
+    current_app.logger.info(f"Plan ID: {plan_id}, User ID: {user_id}")
     
     if not plan_id or not user_id:
         return jsonify(error={'message': 'Missing required parameters: planId or user_id.'}), 400
@@ -927,14 +942,14 @@ def create_checkout_session():
         # start a 3-day trial on the new subscription we are about to create.
         # We do this by passing `subscription_data.trial_period_days = 3` to
         # the Checkout Session.  We also use `payment_behavior =
-        # 'default_incomplete'` to be sure the subscription moves to
+        # 'allow_incomplete'` to be sure the subscription moves to
         # `trialing` immediately and invoices only after the trial.
         # -----------------------------------------------------------------
         subscription_data = {}
         if not customer_id:
             subscription_data = {
                 'trial_period_days': 3,
-                'payment_behavior': 'default_incomplete'
+                'payment_behavior': 'allow_incomplete'
             }
 
         # Step 2: Create or update a 'processing' subscription record.
@@ -971,6 +986,9 @@ def create_checkout_session():
         # Always use environment variables for redirect URLs
         success_url = success_url_cfg + '?session_id={CHECKOUT_SESSION_ID}'
         cancel_url  = cancel_url_cfg
+        
+        current_app.logger.info(f"Success URL: {success_url}")
+        current_app.logger.info(f"Cancel URL: {cancel_url}")
 
         # Step 3: Create the Stripe Checkout Session
         checkout_session = stripe.checkout.Session.create(
