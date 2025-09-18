@@ -15,6 +15,8 @@ services:
     environment:
       - FLASK_ENV=development 
       - OTHER_VARIABLE=value
+      - STRIPE_SUCCESS_URL=https://prepzo-client-git-dev-prepzo.vercel.app/dashboard
+      - STRIPE_CANCEL_URL=https://prepzo-client-git-dev-prepzo.vercel.app
 
 volumes:
   model_cache:
