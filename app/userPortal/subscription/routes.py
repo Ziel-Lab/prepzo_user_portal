@@ -968,16 +968,9 @@ def create_checkout_session():
         success_url_cfg = current_app.config.get('STRIPE_SUCCESS_URL')
         cancel_url_cfg  = current_app.config.get('STRIPE_CANCEL_URL')
 
-        # In non-production we prefer the request's Origin so the redirect
-        # works automatically with localhost, ngrok, Vercel previews, etc.
-        flask_env = current_app.config.get('FLASK_ENV', 'production')
-        origin = request.headers.get('Origin')
-        if flask_env != 'production' and origin:
-            success_url = f"{origin}/success?session_id={{CHECKOUT_SESSION_ID}}"
-            cancel_url  = f"{origin}/cancel"
-        else:
-            success_url = success_url_cfg + '?session_id={CHECKOUT_SESSION_ID}'
-            cancel_url  = cancel_url_cfg
+        # Always use environment variables for redirect URLs
+        success_url = success_url_cfg + '?session_id={CHECKOUT_SESSION_ID}'
+        cancel_url  = cancel_url_cfg
 
         # Step 3: Create the Stripe Checkout Session
         checkout_session = stripe.checkout.Session.create(
