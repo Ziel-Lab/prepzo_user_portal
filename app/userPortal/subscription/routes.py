@@ -911,7 +911,7 @@ def create_checkout_session():
     try:
         # Step 1: Check for an existing ACTIVE subscription to get the customer_id if it exists.
         # This allows Stripe to apply credits or handle upgrades/downgrades correctly.
-        existing_sub_res = supabase.table('user_subscriptions').select('stripe_customer_id').eq('user_id', user_id).in_('status', ['active', 'trialing', 'canceling']).maybe_single().execute()
+        existing_sub_res = supabase.table('user_subscriptions').select('stripe_customer_id').eq('user_id', user_id).in_('status', ['active', 'trialing', 'canceling', 'past_due','canceled']).maybe_single().execute()
         
         customer_id = existing_sub_res.data.get('stripe_customer_id') if (existing_sub_res and existing_sub_res.data) else None
 
