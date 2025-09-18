@@ -60,8 +60,8 @@ jobs:
             set -e
 
             IMAGE_TAG=${{ steps.vars.outputs.sha_short }}
-            ECR_REGISTRY=${{ secrets.ECR_REGISTRY }}
-            ECR_REPOSITORY=${{ secrets.ECR_REPOSITORY }}
+            ECR_REGISTRY=${{ secrets.ECR_DEV_REGISTRY }}
+            ECR_REPOSITORY=${{ secrets.ECR_DEV_REPOSITORY }}
             CONTAINER_NAME=prepzo-dev
             PORT=5000
 
