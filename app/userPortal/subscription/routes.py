@@ -946,11 +946,12 @@ def create_checkout_session():
         # `trialing` immediately and invoices only after the trial.
         # -----------------------------------------------------------------
         subscription_data = {}
+        payment_behavior_param = None
         if not customer_id:
             subscription_data = {
-                'trial_period_days': 3,
-                'payment_behavior': 'default_incomplete'
+                'trial_period_days': 3
             }
+            payment_behavior_param = 'allow_incomplete'
 
         # Step 2: Create or update a 'processing' subscription record.
         # This is the core of the new robust flow. We use upsert to make this idempotent.
@@ -991,17 +992,21 @@ def create_checkout_session():
         current_app.logger.info(f"Cancel URL: {cancel_url}")
 
         # Step 3: Create the Stripe Checkout Session
-        checkout_session = stripe.checkout.Session.create(
-            customer=customer_id,  # Pass existing customer ID if available
-            client_reference_id=user_id,
-            payment_method_types=['card'],
-            line_items=[{'price': price_id, 'quantity': 1}],
-            mode='subscription',
-            subscription_data=subscription_data,
-            success_url=success_url,
-            cancel_url=cancel_url,
-            metadata={'user_id': user_id, 'plan_id': plan_id}
-        )
+        checkout_session_params = {
+            'customer': customer_id,
+            'client_reference_id': user_id,
+            'payment_method_types': ['card'],
+            'line_items': [{'price': price_id, 'quantity': 1}],
+            'mode': 'subscription',
+            'subscription_data': subscription_data,
+            'success_url': success_url,
+            'cancel_url': cancel_url,
+            'metadata': {'user_id': user_id, 'plan_id': plan_id}
+        }
+        if payment_behavior_param:
+            checkout_session_params['payment_behavior'] = payment_behavior_param
+
+        checkout_session = stripe.checkout.Session.create(**checkout_session_params)
         return jsonify(id=checkout_session.id)
     except Exception as e:
         current_app.logger.error(f"Error creating checkout session for user {user_id}: {e}", exc_info=True)
