@@ -79,7 +79,12 @@ def get_subscription_status():
         subscription['usage'] = usage_res.data if (usage_res and usage_res.data) else {}
             
         # Step 4: Ensure plan details are attached.
-        plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
+        if subscription.get('status') == 'active':
+            # User has active subscription, return their actual plan details
+            plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
+        else:
+            # User doesn't have active subscription, return free plan details
+            plan_res = supabase.table('subscription_plans').select('*').eq('id', 1).maybe_single().execute()
         subscription['subscription_plans'] = plan_res.data if (plan_res and plan_res.data) else None
 
         # Step 5: As a final safety net, ensure the 'usage' key is never null.
