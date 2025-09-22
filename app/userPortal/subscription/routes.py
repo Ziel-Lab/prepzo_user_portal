@@ -948,7 +948,8 @@ def create_checkout_session():
         subscription_data = {}
         if not customer_id:
             subscription_data = {
-                'trial_period_days': 3
+                'trial_period_days': 3,
+                'payment_behavior': 'default_incomplete'
             }
 
         # Step 2: Create or update a 'processing' subscription record.
