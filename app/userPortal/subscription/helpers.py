@@ -308,8 +308,11 @@ def check_and_use_feature(feature_name, increment_by=1, *, auto_increment=True):
                 display_name = get_user_display_name(g.user)
 
                 # Step 1: Get the user's current subscription plan (using admin client due to JWT session issue)
-                sub_res = admin_supabase.table('user_subscriptions').select('plan_id').eq('user_id', uid).single().execute()
-                current_plan_id = sub_res.data['plan_id'] if sub_res.data else 1  # Default to Free plan
+                sub_res = admin_supabase.table('user_subscriptions').select('plan_id,status').eq('user_id', uid).single().execute()
+                if sub_res.data and sub_res.data.get('status') == 'active':
+                    current_plan_id = sub_res.data['plan_id']
+                else:
+                    current_plan_id = 1
 
                 # Step 2: Get the limits for the user's CURRENT plan (this table is public read)
                 plan_res = admin_supabase.table('subscription_plans').select('*').eq('id', current_plan_id).single().execute()

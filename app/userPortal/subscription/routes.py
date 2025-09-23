@@ -79,7 +79,13 @@ def get_subscription_status():
         subscription['usage'] = usage_res.data if (usage_res and usage_res.data) else {}
             
         # Step 4: Ensure plan details are attached.
+        if subscription.get('status') == 'active':
+            # User has active subscription, return their actual plan details
         plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
+            plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
+        else:
+            # User doesn't have active subscription, return free plan details
+            plan_res = supabase.table('subscription_plans').select('*').eq('id', 1).maybe_single().execute()
         subscription['subscription_plans'] = plan_res.data if (plan_res and plan_res.data) else None
 
         # Step 5: As a final safety net, ensure the 'usage' key is never null.
@@ -884,9 +890,21 @@ def create_checkout_session():
     It creates or updates a 'processing' subscription record BEFORE redirecting
     the user to Stripe, making our database the source of truth from the start.
     """
+    current_app.logger.info("=== CREATE CHECKOUT SESSION ENDPOINT HIT ===")
+    current_app.logger.info(f"Request method: {request.method}")
+    current_app.logger.info(f"Request headers: {dict(request.headers)}")
+    current_app.logger.info(f"Request data: {request.get_data()}")
+    
     data = request.get_json()
+    data = request.get_json()
+    current_app.logger.info(f"Parsed JSON data: {data}")
+    
+    plan_id = data.get('planId')
     plan_id = data.get('planId')
     user_id = g.user.id
+    user_id = g.user.id
+    
+    current_app.logger.info(f"Plan ID: {plan_id}, User ID: {user_id}")
     
     if not plan_id or not user_id:
         return jsonify(error={'message': 'Missing required parameters: planId or user_id.'}), 400
@@ -911,10 +929,27 @@ def create_checkout_session():
     try:
         # Step 1: Check for an existing ACTIVE subscription to get the customer_id if it exists.
         # This allows Stripe to apply credits or handle upgrades/downgrades correctly.
-        existing_sub_res = supabase.table('user_subscriptions').select('stripe_customer_id').eq('user_id', user_id).in_('status', ['active', 'trialing', 'canceling']).maybe_single().execute()
+        existing_sub_res = supabase.table('user_subscriptions')\
+            .select('stripe_customer_id')\
+            .eq('user_id', user_id)\
+            .in_('status', ['active', 'trialing', 'canceling', 'canceled', 'past_due'])\
+            .maybe_single().execute()
         
         customer_id = existing_sub_res.data.get('stripe_customer_id') if (existing_sub_res and existing_sub_res.data) else None
-
+        
+         # ---------------------- FREE TRIAL HANDLING ----------------------
+        # If the user has never subscribed before (no Stripe customer_id) we
+        # start a 3-day trial on the new subscription we are about to create.
+        # We do this by passing `subscription_data.trial_period_days = 3` to
+        # the Checkout Session. This will create a subscription that starts
+        # in 'trialing' status and automatically converts to 'active' after
+        # the trial period ends.
+        # -----------------------------------------------------------------
+        subscription_data = {}
+        if not customer_id:
+            subscription_data = {
+                'trial_period_days': 3,
+            }
         # Step 2: Create or update a 'processing' subscription record.
         # This is the core of the new robust flow. We use upsert to make this idempotent.
         # This record now holds all necessary info *before* we call Stripe.
@@ -939,12 +974,25 @@ def create_checkout_session():
         # Minimal validation on the upsert response
         if not upsert_res:
              raise Exception("Upsert operation to create 'processing' subscription failed.")
+        
+         # -------------------------------------------------------------
+        # Build success & cancel URLs
+        # -------------------------------------------------------------
+        success_url_cfg = current_app.config.get('STRIPE_SUCCESS_URL')
+        cancel_url_cfg  = current_app.config.get('STRIPE_CANCEL_URL')
+        # Always use environment variables for redirect URLs
+        success_url = success_url_cfg + '?session_id={CHECKOUT_SESSION_ID}'
+        cancel_url  = cancel_url_cfg
+        
+        current_app.logger.info(f"Success URL: {success_url}")
+        current_app.logger.info(f"Cancel URL: {cancel_url}")
 
         # Step 3: Create the Stripe Checkout Session
         checkout_session = stripe.checkout.Session.create(
             customer=customer_id, # Pass existing customer ID if available
             client_reference_id=user_id, # Reliably links the session back to our user
             payment_method_types=['card'],
+            payment_method_collection='always',
             line_items=[
                 {
                     'price': price_id,
@@ -952,8 +1000,8 @@ def create_checkout_session():
                 },
             ],
             mode='subscription',
-            success_url=current_app.config['STRIPE_SUCCESS_URL'] + '?session_id={CHECKOUT_SESSION_ID}',
-            cancel_url=current_app.config['STRIPE_CANCEL_URL'],
+            success_url=success_url,
+            cancel_url=cancel_url,
             metadata={
                 'user_id': user_id,
                 'plan_id': plan_id
