@@ -562,7 +562,8 @@ def stripe_webhook():
                 current_app.logger.info(f"Successfully logged 'active' (payment succeeded) subscription for user {user_id}")
 
             except Exception as e:
-                error_message = f"Webhook processing failed for '{event_type}'. Customer: {customer_id}. Error: {e}"
+                # Avoid referencing undefined variables in error logs
+                error_message = f"Webhook processing failed for '{event_type}'. Error: {e}"
                 current_app.logger.error(error_message, exc_info=True)
                 return jsonify(error=error_message), 500
 
@@ -998,6 +999,7 @@ def create_checkout_session():
             mode='subscription',
             success_url=success_url,
             cancel_url=cancel_url,
+            subscription_data=subscription_data,
             metadata={
                 'user_id': user_id,
                 'plan_id': plan_id
