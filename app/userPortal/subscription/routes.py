@@ -81,7 +81,6 @@ def get_subscription_status():
         # Step 4: Ensure plan details are attached.
         if subscription.get('status') == 'active':
             # User has active subscription, return their actual plan details
-        plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
             plan_res = supabase.table('subscription_plans').select('*').eq('id', subscription.get('plan_id', 1)).maybe_single().execute()
         else:
             # User doesn't have active subscription, return free plan details
@@ -896,12 +895,9 @@ def create_checkout_session():
     current_app.logger.info(f"Request data: {request.get_data()}")
     
     data = request.get_json()
-    data = request.get_json()
     current_app.logger.info(f"Parsed JSON data: {data}")
     
     plan_id = data.get('planId')
-    plan_id = data.get('planId')
-    user_id = g.user.id
     user_id = g.user.id
     
     current_app.logger.info(f"Plan ID: {plan_id}, User ID: {user_id}")
