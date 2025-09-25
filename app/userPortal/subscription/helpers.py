@@ -5,7 +5,17 @@ from functools import wraps
 import calendar
 import time
 from postgrest.exceptions import APIError
-from gotrue.errors import AuthApiError, AuthRetryableError
+# Support both gotrue and supabase_auth exception classes in production
+try:
+    from gotrue.errors import AuthApiError as GoTrueAuthApiError, AuthRetryableError
+except Exception:  # pragma: no cover - fallback if gotrue not installed
+    GoTrueAuthApiError = None
+    AuthRetryableError = Exception
+
+try:
+    from supabase_auth.errors import AuthApiError as SupabaseAuthApiError  # type: ignore
+except Exception:  # pragma: no cover - fallback if supabase_auth not installed
+    SupabaseAuthApiError = None
 from dateutil.relativedelta import relativedelta
 
 
@@ -123,7 +133,7 @@ def require_authentication(f):
                 current_app.logger.warning(f"Could not extract custom claims for user {user.id[:8]}***: {e}")
                 current_app.logger.info(f"Authentication successful for user {user.id[:8]}*** using dual-client architecture")
 
-        except AuthApiError as e:
+        except (GoTrueAuthApiError if GoTrueAuthApiError else tuple(), SupabaseAuthApiError if SupabaseAuthApiError else tuple()) as e:
             error_message = str(e).lower()
             
             # Differentiate between different auth failures for frontend handling
@@ -141,7 +151,8 @@ def require_authentication(f):
                 response.headers['Cache-Control'] = 'no-store'
                 response.headers['Pragma'] = 'no-cache'
                 return response, 401
-            elif "malformed" in error_message or "not found" in error_message or "invalid jwt" in error_message:
+            elif ("malformed" in error_message or "not found" in error_message or "invalid jwt" in error_message or 
+                  "user from sub claim in jwt does not exist" in error_message or "missing sub" in error_message):
                 current_app.logger.warning(f"Authentication failed: Invalid JWT from IP {request.remote_addr} - {type(e).__name__}")
                 response = jsonify({
                     "error": "token_invalid",
