@@ -12,6 +12,18 @@ from dateutil.relativedelta import relativedelta
 class QuotaExceededError(Exception):
     pass
 
+def retry(func, max_attempts=3, base_delay=0.1):
+    """Simple retry with exponential backoff for transient failures"""
+    for attempt in range(max_attempts):
+        try:
+            return func()
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                raise
+            delay = base_delay * (2 ** attempt)
+            time.sleep(delay)
+    raise Exception("Max retries exceeded")
+
 def _retry_auth_with_backoff(admin_client, jwt_token, max_retries=3):
     """
     Retry authentication with exponential backoff for AuthRetryableError

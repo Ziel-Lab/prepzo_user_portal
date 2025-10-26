@@ -4,17 +4,20 @@ services:
   app:
     build: .
     ports:
-      - "5000:5000"  
+      - "5001:5000"  
                      
     volumes:
       - .:/app       
       - model_cache:/root/.cache  # Cache for downloaded models
                      
-    env_file:
-      - .env        
     environment:
       - FLASK_ENV=development 
-      - OTHER_VARIABLE=value
+      - FLASK_DEBUG=True
+      - FLASK_APP=run.py
+      # AWS credentials for Secret Manager access
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=us-east-1
 
 volumes:
   model_cache:
