@@ -31,7 +31,7 @@ def load_secrets_from_aws():
     
     try:
         logger.info("Loading secrets from AWS Secret Manager...")
-        secret_name = "userPortal-dev"
+        secret_name = "userPortal"
         region_name = "us-east-1"
         secrets = get_secret(secret_name, region_name)
         
