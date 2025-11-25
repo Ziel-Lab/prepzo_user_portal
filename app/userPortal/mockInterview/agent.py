@@ -1117,6 +1117,11 @@ def main():
             return False
         
         logger.info("All required environment variables are set")
+        # Debug: Log the actual values (masked for security)
+        livekit_url = os.getenv('LIVEKIT_URL', '')
+        logger.info(f"LIVEKIT_URL = {livekit_url[:60]}..." if len(livekit_url) > 60 else f"LIVEKIT_URL = {livekit_url}")
+        logger.info(f"LIVEKIT_API_KEY = {os.getenv('LIVEKIT_API_KEY', '')[:10]}...") 
+        logger.info(f"LIVEKIT_API_SECRET = {os.getenv('LIVEKIT_API_SECRET', '')[:10]}...")
         
         # Run the agent with correct configuration
         try:
