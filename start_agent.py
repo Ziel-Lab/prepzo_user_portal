@@ -62,9 +62,17 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] in ['dev', 'console']:
         agent_mode = sys.argv[1]
     
-    # Override sys.argv for the agent to pick up the mode
-    sys.argv = ['agent.py', agent_mode]
+    # Build sys.argv with LiveKit connection arguments
+    # The LiveKit CLI (agents.cli.run_app) parses these from sys.argv
+    sys.argv = [
+        'agent.py',
+        agent_mode,
+        '--url', livekit_url,
+        '--api-key', livekit_api_key,
+        '--api-secret', livekit_api_secret,
+    ]
     print(f"Running agent in {agent_mode} mode")
+    print(f"CLI args: {agent_mode} --url {livekit_url[:50]}... --api-key [SET] --api-secret [SET]")
     
-    # Now run the agent - environment variables are set and will persist
+    # Now run the agent - environment variables AND CLI args are set
     main() 

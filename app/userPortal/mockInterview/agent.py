@@ -1126,14 +1126,26 @@ def main():
         # Run the agent with correct configuration
         try:
             logger.info("Creating WorkerOptions...")
+            
+            # Get connection info from environment (set by start_agent.py)
+            ws_url = os.environ.get('LIVEKIT_URL', '')
+            api_key = os.environ.get('LIVEKIT_API_KEY', '')
+            api_secret = os.environ.get('LIVEKIT_API_SECRET', '')
+            
+            logger.info(f"Configuring worker with ws_url={ws_url[:50]}...")
+            
             worker_options = agents.WorkerOptions(
                 entrypoint_fnc=entrypoint,
-                port=8081,  # Debug port
-                drain_timeout=30,  # Reduced from default 30 minutes to 30 seconds
+                ws_url=ws_url,           # Explicit WebSocket URL
+                api_key=api_key,         # Explicit API key
+                api_secret=api_secret,   # Explicit API secret
+                port=8081,               # Debug port
+                drain_timeout=30,        # Reduced from default 30 minutes to 30 seconds
                 # No agent_name = automatic dispatch enabled (1 agent per room)
                 # LiveKit handles concurrent rooms automatically
             )
-            logger.info("Starting Simple LiveKit agent worker with 30s drain timeout...")
+            logger.info(f"Starting LiveKit agent worker...")
+            logger.info(f"Will connect to: {os.environ.get('LIVEKIT_URL', 'NOT SET')}")
             agents.cli.run_app(worker_options)
             return True
         except Exception as e:
